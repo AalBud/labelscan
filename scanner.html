@@ -67,6 +67,9 @@
                  background:var(--accent);color:#04121f;font-weight:700;font-size:15px}
   .hint{font-size:12px;color:var(--dim);margin-top:12px;line-height:1.5}
   .err{color:var(--bad);font-size:13px;margin-top:10px;min-height:18px}
+  .ver{position:absolute;right:14px;bottom:10px;font:700 12px ui-monospace,Menlo,monospace;
+       color:var(--accent);letter-spacing:1px;opacity:.85}
+  .card{position:relative}
   .hide{display:none!important}
 </style>
 </head>
@@ -93,12 +96,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Read-only. Nothing is stored on this device.</div>
+    <div class="ver">V3</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner</h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V3</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
   </div>
@@ -135,8 +139,9 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
 <script>
 "use strict";
 const $=id=>document.getElementById(id);
-const S={url:'',token:'',index:null,worker:null,busy:false,
-         lastKey:'',lastAt:0,cycles:0,wide:false,detector:null,seen:new Set()};
+const S={url:'',token:'',index:null,tabs:null,worker:null,busy:false,
+         lastKey:'',lastAt:0,cycles:0,wide:false,detector:null,seen:new Set(),
+         streakKey:'',streak:0};
 
 const RESCAN_MS = 4000;   // after this, the same label may be reported again
 
@@ -185,9 +190,12 @@ async function start(url,token){
     const r=await api({action:'index'});
     if(!r.ok) throw new Error(r.error||'refused');
     S.index=r.index;
-    let rows=0;for(const k in S.index) rows+=S.index[k].length;
+    S.tabs=new Set();
+    let rows=0;
+    for(const k in S.index){ rows+=S.index[k].length;
+      for(const x of S.index[k]) S.tabs.add(String(x.t).toUpperCase()); }
     setStatus(Object.keys(S.index).length+' codes','on');
-    $('meta').textContent='Loaded '+rows+' rows.';
+    $('meta').textContent='Loaded '+rows+' rows across '+S.tabs.size+' designers.';
   }catch(e){
     setStatus('sheet failed','err');
     $('gate').classList.remove('hide');$('app').classList.add('hide');
@@ -271,11 +279,21 @@ function grabFrame(wide){
   return cv;
 }
 
-/* =================== FORMAT-AGNOSTIC MATCHING ============================
-   No layout is assumed. Every digit window in the text is tried against the
-   sheet index and scored, so a label from any vendor works as long as its
-   D.No. appears somewhere in the printed code.
+/* ========================= MATCHING AND VALIDATION =======================
+   A real label is  LETTERS + 3-digit serial + D.No. + month + cost + year.
+   Four things must all hold before a camera read is accepted:
+
+     1. the leading letters name a designer that exists in the sheet
+     2. at least MIN_DIGITS digits follow, so a cut-off label is rejected
+     3. the D.No. sits at its proper place, straight after the 3-digit serial
+     4. the row it matches lives on that same designer's tab
+
+   Random noise off a table cannot satisfy all four, which is what stops the
+   phone inventing results when it is put face down.
    ======================================================================== */
+const MIN_DIGITS   = 13;   // shortest genuine code seen in the data is 15
+const MIN_CONF     = 55;   // Tesseract confidence floor
+const CONFIRM_READS= 2;    // identical result needed this many frames running
 
 /** Tidy separators only. Character substitution happens per interpretation. */
 function deOcr(s){
@@ -320,7 +338,28 @@ function readings(tok){
  * normally sits, when the vendor letters point at the same tab, and when the
  * surrounding run looks like a full product code.
  */
-function candidates(text){
+/**
+ * Do these leading letters name this tab?  AMY↔AM, VAL↔BVAL, HAZ↔CHAZ, AAR↔CAAR
+ * — the packing slip drops the first letter of the tab name.
+ */
+function vendorMatches(pref,tab){
+  if(!pref||!tab) return false;
+  const P=pref.toUpperCase(), T=tab.toUpperCase(), T1=T.slice(1);
+  return P===T || T.startsWith(P) || P.startsWith(T) ||
+         P===T1 || T1.startsWith(P) || (T1.length>1 && P.startsWith(T1));
+}
+function knownVendor(pref){
+  if(!S.tabs) return true;
+  for(const t of S.tabs) if(vendorMatches(pref,t)) return true;
+  return false;
+}
+
+/**
+ * strict = a camera read, every rule enforced.
+ * loose  = typed input or a scanned barcode, where the payload may be just the
+ *          number and there are no OCR artefacts to defend against.
+ */
+function candidates(text,strict){
   const clean=deOcr(text);
   const out=new Map();
   const add=(key,score,why,ctx)=>{
@@ -330,6 +369,40 @@ function candidates(text){
     const prev=out.get(key);
     if(!prev||score>prev.score) out.set(key,{key,score,why,ctx,rows});
   };
+  if(strict){
+    // ---- the disciplined path: structure must hold, no guessing
+    const toks=clean.split(/\s+/).filter(Boolean);
+    const joined=[];
+    for(let i=0;i<toks.length-1;i++) joined.push(toks[i]+toks[i+1]);
+    for(let i=0;i<toks.length-2;i++) joined.push(toks[i]+toks[i+1]+toks[i+2]);
+    let reason='';
+    for(const tok of toks.concat(joined)){
+      for(const [pref,dg] of readings(tok)){
+        if(!pref || pref.length<2 || pref.length>5){ reason=reason||'no designer letters'; continue; }
+        if(!knownVendor(pref)){ reason=reason||'unknown designer "'+pref+'"'; continue; }
+        if(dg.length<MIN_DIGITS){ reason=reason||'partial code ('+dg.length+' digits, need '+MIN_DIGITS+')'; continue; }
+        // D.No. only ever starts right after the 3-digit serial
+        for(let len=6;len>=3;len--){
+          if(3+len>dg.length) continue;
+          const win=dg.slice(3,3+len), k=strip(win), rows=S.index[k];
+          if(!rows) continue;
+          const onVendorTab=rows.filter(r=>vendorMatches(pref,r.t));
+          if(!onVendorTab.length){ reason=reason||'D.No. '+k+' is not on '+pref+"'s tab"; continue; }
+          add(k, 100+k.length*4, 'D.No. after serial, '+k.length+' digits, '+
+                                 onVendorTab[0].t+' confirmed', tok);
+        }
+      }
+    }
+    const list=[...out.values()].sort((a,b)=>b.score-a.score);
+    // keep only rows belonging to the designer that was actually read
+    for(const c of list){
+      const p=(c.ctx.match(/^[A-Z]+/)||[''])[0];
+      const only=c.rows.filter(r=>vendorMatches(p,r.t));
+      if(only.length) c.rows=only;
+    }
+    list.reason=reason;
+    return list;
+  }
   const toks=clean.split(/\s+/).filter(Boolean);
   // also try neighbouring tokens joined, in case OCR split the code with a space
   const joined=[];
@@ -372,7 +445,7 @@ async function loop(){
   try{
     if(!S.busy){
       S.busy=true;
-      let text='', via='';
+      let text='', via='', conf=100;
       // 1. a real barcode is instant and exact, so try it first
       if(S.detector && $('vid').videoWidth){
         try{
@@ -385,14 +458,21 @@ async function loop(){
         const cv=grabFrame(S.wide);
         if(cv){
           const {data}=await S.worker.recognize(cv);
-          text=(data&&data.text)||''; via='ocr';
+          text=(data&&data.text)||''; conf=(data&&data.confidence)||0; via='ocr';
         }
       }
       S.cycles++;
       const flat=text.replace(/\s+/g,' ').trim();
-      $('live').textContent=(via?via+': ':'')+(flat||'(nothing readable)');
       $('tick').textContent='#'+S.cycles+' · '+(Date.now()-t0)+'ms';
-      if(flat) consider(flat);
+      if(via==='ocr' && conf && conf<MIN_CONF){
+        $('live').textContent='low confidence '+Math.round(conf)+'% — hold steadier';
+        S.streakKey=''; S.streak=0;
+      }else if(flat){
+        consider(flat, via==='barcode');
+      }else{
+        $('live').textContent='(nothing readable)';
+        S.streakKey=''; S.streak=0;
+      }
     }
   }catch(e){
     $('live').textContent='error: '+e.message;
@@ -412,10 +492,23 @@ function watchdog(){
   },6000);
 }
 
-function consider(text){
-  const cs=candidates(text);
-  if(!cs.length) return;
+function consider(text, fromBarcode){
+  const cs=candidates(text, !fromBarcode);
+  if(!cs.length){
+    $('live').textContent = (cs.reason ? 'rejected: '+cs.reason : 'no designer code in view')+
+                            '  ·  '+text.slice(0,40);
+    S.streakKey=''; S.streak=0;
+    return;
+  }
   const best=cs[0];
+  // must read the same thing CONFIRM_READS frames running before it counts
+  if(best.key===S.streakKey){ S.streak++; } else { S.streakKey=best.key; S.streak=1; }
+  const need = fromBarcode ? 1 : CONFIRM_READS;
+  if(S.streak<need){
+    $('live').textContent='confirming '+best.key+'  ('+S.streak+'/'+need+')';
+    return;
+  }
+  $('live').textContent='✓ '+text.slice(0,44);
   const now=Date.now();
   if(best.key===S.lastKey && now-S.lastAt<RESCAN_MS) return;   // same label still in view
   S.lastKey=best.key; S.lastAt=now;
@@ -444,7 +537,7 @@ function render(raw,best,alts){
     : '';
   [...$('alts').querySelectorAll('b')].forEach(b=>b.onclick=()=>{
     const k=b.getAttribute('data-k');
-    const c=candidates(raw).find(x=>x.key===k)||{key:k,why:'chosen manually',rows:S.index[k]||[]};
+    const c=candidates(raw,false).find(x=>x.key===k)||{key:k,why:'chosen manually',rows:S.index[k]||[]};
     S.lastKey=k; S.lastAt=Date.now(); render(raw,c,[]);
   });
   addHistory(best.key,Object.keys(byTab).map(t=>t+': '+byTab[t].map(x=>x.s).join(', ')).join(' | '),
@@ -467,7 +560,7 @@ function beep(f,ms){try{ac=ac||new(window.AudioContext||window.webkitAudioContex
 
 /* --------------------------------------------------------------- buttons */
 $('btnClear').onclick=()=>{
-  S.lastKey='';S.lastAt=0;
+  S.lastKey='';S.lastAt=0;S.streakKey='';S.streak=0;
   $('raw').textContent='—';$('dno').className='dno none';$('dno').textContent='point at a label';
   $('meta').textContent='';$('out').innerHTML='';$('alts').innerHTML='';
 };
@@ -480,7 +573,7 @@ $('btnType').onclick=()=>{
   const v=prompt('Type the full code, or just the design number');
   if(!v) return;
   S.lastKey='';
-  const cs=candidates(v);
+  const cs=candidates(v,false);
   if(cs.length){ render('(typed) '+v, cs[0], cs.slice(1,5)); return; }
   const k=strip(v.replace(/\D/g,''));
   const rows=S.index[k]||[];
