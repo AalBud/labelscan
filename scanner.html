@@ -105,13 +105,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. Nothing is stored on this device.</div>
-    <div class="ver">V6</div>
+    <div class="ver">V7</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V6</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V7</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
   </div>
@@ -509,7 +509,8 @@ function candidates(text,strict){
   if(toks.length>2) for(let i=0;i<toks.length-2;i++) joined.push(toks[i]+toks[i+1]+toks[i+2]);
 
   for(const tok of toks.concat(joined)){
-  for(const [pref,dg] of readings(tok)){
+  for(const rd of readings(tok)){
+    const pref=rd.pref, dg=rd.dg;
     const rel=rows=>rows.some(r=>r.t===pref||(pref&&(pref.startsWith(r.t)||r.t.startsWith(pref))));
 
     // Every window of 3..6 digits, at every offset. No layout is assumed, but
@@ -517,8 +518,9 @@ function candidates(text,strict){
     // both the packing-slip and the generated formats, so it scores far higher.
     // D.No. length varies by vendor (1294 is 4, 10124 is 5, 010090 is 6), so
     // all lengths are tried at that offset too.
-    for(let len=6;len>=3;len--){
+    for(let len=6;len>=1;len--){
       for(let i=0;i+len<=dg.length;i++){
+        if(len<3 && i!==3) continue;      // 1-2 digits only at the D.No. position
         const win=dg.slice(i,i+len);
         const k=strip(win);
         const r=S.index[k];
@@ -527,6 +529,7 @@ function candidates(text,strict){
         // "110", which must not be treated as a confident 5-digit read.
         let sc = k.length*4;
         if(i===3)                    sc+=50;        // canonical D.No. position
+        if(knownVendor(pref))        sc+=35;        // "TIT" beats a "TI" mis-split
         if(i===0 && win===k)         sc+=6;         // whole run, nothing stripped
         if(rel(r))                   sc+=40;        // vendor letters agree
         if(win!==k)                  sc-=4;         // leading zeros were dropped
@@ -720,21 +723,39 @@ $('btnWide').onclick=()=>{
   document.querySelector('.guide').style.opacity=S.wide?0.25:1;
 };
 $('btnType').onclick=()=>{
-  const v=prompt('Type the full code, or just the design number');
-  if(!v) return;
-  S.lastKey='';
-  const cs=candidates(v,false);
-  if(cs.length){ render('(typed) '+v, cs[0], cs.slice(1,5)); return; }
-  const k=strip(v.replace(/\D/g,''));
-  const rows=S.index[k]||[];
-  if(rows.length) render('(typed) '+v,{key:k,why:'typed',rows},[]);
-  else{
-    $('raw').textContent='(typed) '+v;
-    $('dno').className='dno none';$('dno').textContent='no match';
-    $('meta').textContent='';$('out').innerHTML='<div class="empty">No D.No. '+esc(k)+' in the sheet.</div>';
-    $('alts').innerHTML='';
+  const v=prompt('Type a D.No. (e.g. 953 or 3263A) or the whole printed code');
+  if(v===null) return;
+  const raw=String(v).trim().toUpperCase();
+  if(!raw) return;
+  S.lastKey=''; S.streakKey=''; S.streak=0;
+
+  // A bare D.No. - digits with an optional letter - is looked up directly,
+  // which is what you almost always want when typing.
+  const bare=raw.match(/^([0-9]{1,6})\s*([A-Z]?)$/);
+  if(bare){
+    const key=strip(bare[1]), suf=bare[2]||'';
+    const all=S.index[key]||[];
+    const tailOf=r=>{const m=String(r.dn||'').toUpperCase().match(/([A-Z]+)$/);return m?m[1]:'';};
+    let rows=all.filter(r=> suf ? tailOf(r)===suf : tailOf(r)==='');
+    if(!rows.length) rows=all;                 // no exact variant: show them all
+    if(rows.length) render('(typed) '+raw,{key:key+suf,why:'typed D.No.',rows:rows},[]);
+    else noMatch(raw,key+suf);
+    return;
   }
+  // Otherwise treat it as a whole printed code. Typed text has no OCR damage,
+  // so the strict reading is tried first and only then the forgiving one.
+  const cs=candidates(raw,true).length ? candidates(raw,true) : candidates(raw,false);
+  if(cs.length){ render('(typed) '+raw, cs[0], cs.slice(1,5)); return; }
+  noMatch(raw, strip(raw.replace(/\D/g,'')) );
 };
+
+function noMatch(raw,key){
+  $('raw').textContent='(typed) '+raw;
+  $('dno').className='dno none'; $('dno').textContent='no match';
+  $('meta').textContent='';
+  $('out').innerHTML='<div class="empty">Nothing in the sheet for '+esc(key)+'.</div>';
+  $('alts').innerHTML='';
+}
 </script>
 </body>
 </html>
