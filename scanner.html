@@ -96,13 +96,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Read-only. Nothing is stored on this device.</div>
-    <div class="ver">V4</div>
+    <div class="ver">V5</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V4</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V5</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
   </div>
@@ -439,11 +439,20 @@ function candidates(text,strict){
         if(!pref || pref.length>5){ reason=reason||'no designer letters'; continue; }
         if(!knownVendor(pref)){ reason=reason||'unknown designer "'+pref+'"'; continue; }
         if(dg.length<MIN_DIGITS){ reason=reason||'partial code ('+dg.length+' digits, need '+MIN_DIGITS+')'; continue; }
-        // D.No. only ever starts right after the 3-digit serial
-        for(let len=6;len>=3;len--){
+        // The D.No. starts right after the 3-digit serial and is 1-6 digits
+        // long. Whatever its length, the two digits straight after it are the
+        // month, so 01-12 there confirms we cut the number in the right place.
+        // For a 1- or 2-digit D.No. that check is required, because such a
+        // short window would otherwise match almost anything.
+        for(let len=6;len>=1;len--){
           if(3+len>dg.length) continue;
           const win=dg.slice(3,3+len), k=strip(win), rows=S.index[k];
           if(!rows) continue;
+          const after=dg.slice(3+len,3+len+2);
+          const monthOK=/^\d{2}$/.test(after) && +after>=1 && +after<=12;
+          if(k.length<=2 && !monthOK){
+            reason=reason||'short D.No. '+k+' not followed by a month'; continue;
+          }
           const onVendorTab=rows.filter(r=>vendorMatches(pref,r.t));
           if(!onVendorTab.length){ reason=reason||'D.No. '+k+' is not on '+pref+"'s tab"; continue; }
           // Only one letter survived the glare. Accept it, but only when it
@@ -454,8 +463,9 @@ function candidates(text,strict){
               reason=reason||'only one designer letter readable'; continue;
             }
           }
-          add(k, 100+k.length*4, 'D.No. after serial, '+k.length+' digits, '+
-                                 onVendorTab[0].t+' confirmed', tok);
+          add(k, 100 + k.length*4 + (monthOK?30:0),
+              'D.No. after serial, '+k.length+' digit'+(k.length===1?'':'s')+
+              (monthOK?', month '+after:'')+', '+onVendorTab[0].t+' confirmed', tok);
         }
       }
     }
