@@ -55,6 +55,21 @@
   .grp:first-child{border-top:0;padding-top:0;margin-top:0}
   .gt{font-size:12px;color:var(--accent);font-weight:700}
   .empty{color:var(--warn);font-size:14px;margin-top:8px}
+  .map{margin-top:12px}
+  .maph{font-size:11px;color:var(--dim);margin:8px 0 4px;letter-spacing:.4px}
+  .maph b{color:var(--accent)}
+  .strip{display:flex;gap:2px;align-items:stretch;width:100%}
+  .seg{flex:1 1 0;min-width:0;height:34px;border-radius:3px;background:#1b2129;
+       border:1px solid #232a33;display:flex;align-items:center;justify-content:center;
+       font:700 10px ui-monospace,Menlo,monospace;color:#3d4650;overflow:hidden}
+  .seg.hit{background:#2ea043;border-color:#3fb950;color:#fff;cursor:pointer;
+           box-shadow:0 0 0 1px #3fb950 inset}
+  .seg.hit.done{background:#8b1d18;border-color:#c9392f;color:#ffd7d4}
+  .seg.hit:active{transform:scale(.94)}
+    .ruler{display:flex;gap:2px;width:100%;margin-top:2px}
+  .ruler span{flex:1 1 0;min-width:0;text-align:center;font:9px ui-monospace,Menlo,monospace;color:#4a545f}
+  .batchset{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim)}
+  .batchset input{width:52px;padding:3px 6px;font-size:12px;text-align:center}
   .alts{margin-top:9px;font-size:12px;color:var(--dim)}
   .alts b{color:var(--txt);cursor:pointer;border-bottom:1px dotted var(--dim);margin-right:9px}
 
@@ -105,15 +120,18 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. Nothing is stored on this device.</div>
-    <div class="ver">V7</div>
+    <div class="ver">V8</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V7</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V8</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
+    <span class="pill batchset">strip of
+      <input id="inBatch" type="number" min="1" max="200" value="20" inputmode="numeric">
+    </span>
   </div>
 
   <div class="cam">
@@ -133,6 +151,7 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <div class="dno none" id="dno">point at a label</div>
     <div class="meta" id="meta"></div>
     <div id="out"></div>
+    <div class="map" id="map"></div>
     <div class="alts" id="alts"></div>
   </div>
 
@@ -629,7 +648,7 @@ async function pollProgress(){
 
 /** Repaint tick state without rebuilding the result, so a scan is not lost. */
 function paintDone(){
-  document.querySelectorAll('.chip[data-k]').forEach(el=>{
+  document.querySelectorAll('.chip[data-k],.seg.hit[data-k]').forEach(el=>{
     if(el.classList.contains('pend')) return;          // a click is still in flight
     const rec=S.done[el.getAttribute('data-k')];
     el.classList.toggle('done', !!rec);
@@ -664,9 +683,69 @@ async function toggleDone(el){
   beep(wasDone?300:620,70);
 }
 
+/* ======================= WHERE IS THE STICKER? ==========================
+   Stickers come off the Phomemo as a continuous strip, printed in serial
+   order, BATCH at a time. So a serial fixes its position exactly:
+
+       strip  = floor((serial-1) / BATCH) + 1
+       slot   = ((serial-1) % BATCH) + 1        counted from the top
+
+   The map below draws each strip involved and lights up the slots you need,
+   so a nine-piece design shows as one cluster you can peel in a single pass
+   instead of nine separate hunts.
+   ======================================================================== */
+function batchSize(){
+  const v=parseInt($('inBatch').value,10);
+  return (v&&v>0&&v<=200)?v:20;
+}
+function slotOf(serial){
+  const n=Number(serial), B=batchSize();
+  if(!isFinite(n)||n<1) return null;
+  return { strip: Math.floor((n-1)/B)+1, slot: ((n-1)%B)+1, of: B };
+}
+
+function buildMap(rowsByTab){
+  const B=batchSize();
+  let html='';
+  for(const tab of Object.keys(rowsByTab).sort()){
+    // group this tab's pieces by which strip they sit on
+    const strips={};
+    for(const r of rowsByTab[tab]){
+      const p=slotOf(r.s); if(!p) continue;
+      (strips[p.strip]=strips[p.strip]||[]).push({slot:p.slot,row:r});
+    }
+    for(const sn of Object.keys(strips).sort((a,b)=>a-b)){
+      const hits=strips[sn];
+      const bySlot={}; hits.forEach(h=>bySlot[h.slot]=h.row);
+      const slots=hits.map(h=>h.slot).sort((a,b)=>a-b);
+      const rangeTxt = slots.length===1 ? '#'+slots[0]
+                     : '#'+slots[0]+'–'+slots[slots.length-1]+
+                       ' ('+slots.length+' stickers)';
+      html+='<div class="maph">'+esc(tab)+' &nbsp;·&nbsp; strip <b>'+sn+
+            '</b> &nbsp;·&nbsp; <b>'+rangeTxt+'</b> from the top of '+B+'</div>';
+      html+='<div class="strip">';
+      for(let i=1;i<=B;i++){
+        const row=bySlot[i];
+        if(row){
+          html+='<div class="seg hit" data-k="'+esc(dkey(row.t,row.s))+'" data-tab="'+
+                esc(row.t)+'" data-ser="'+esc(row.s)+'" data-dno="'+esc(row.dn||'')+
+                '" title="serial '+esc(row.s)+'">'+i+'</div>';
+        }else{
+          html+='<div class="seg"></div>';
+        }
+      }
+      html+='</div><div class="ruler">';
+      for(let i=1;i<=B;i++) html+='<span>'+((i%5===0||i===1)?i:'')+'</span>';
+      html+='</div>';
+    }
+  }
+  return html;
+}
+
 /* ---------------------------------------------------------------- render */
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function render(raw,best,alts){
+  S.lastRender=[raw,best,alts];
   $('raw').textContent=raw.length>90?raw.slice(0,90)+'…':raw;
   $('dno').className='dno'; $('dno').textContent=best.key;
   $('meta').textContent=best.why+'  ·  '+best.rows.length+' row'+(best.rows.length===1?'':'s');
@@ -682,7 +761,9 @@ function render(raw,best,alts){
                     '<span class="who"></span></div>').join('')+'</div></div>';
   }
   $('out').innerHTML=html;
-  [...$('out').querySelectorAll('.chip[data-k]')].forEach(c=>c.onclick=()=>toggleDone(c));
+  $('map').innerHTML=buildMap(byTab);
+  [...document.querySelectorAll('.chip[data-k],.seg.hit[data-k]')]
+      .forEach(c=>c.onclick=()=>toggleDone(c));
   paintDone();
   $('alts').innerHTML = alts.length
     ? 'Other possible readings: '+alts.map(a=>'<b data-k="'+esc(a.key)+'">'+esc(a.key)+
@@ -716,7 +797,9 @@ $('btnClear').onclick=()=>{
   S.lastKey='';S.lastAt=0;S.streakKey='';S.streak=0;S.streakAt=0;
   $('raw').textContent='—';$('dno').className='dno none';$('dno').textContent='point at a label';
   $('meta').textContent='';$('out').innerHTML='';$('alts').innerHTML='';
+  $('map').innerHTML='';
 };
+$('inBatch').onchange=()=>{ if(S.lastRender) render(...S.lastRender); };
 $('btnWide').onclick=()=>{
   S.wide=!S.wide;
   $('btnWide').textContent=S.wide?'Guide box':'Full frame';
@@ -754,7 +837,7 @@ function noMatch(raw,key){
   $('dno').className='dno none'; $('dno').textContent='no match';
   $('meta').textContent='';
   $('out').innerHTML='<div class="empty">Nothing in the sheet for '+esc(key)+'.</div>';
-  $('alts').innerHTML='';
+  $('alts').innerHTML=''; $('map').innerHTML=''; S.lastRender=null;
 }
 </script>
 </body>
