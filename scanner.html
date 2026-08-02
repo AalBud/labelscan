@@ -43,7 +43,14 @@
   .meta{font-size:12px;color:var(--dim)}
   .serials{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
   .chip{background:#1f6f34;color:#fff;font-weight:700;font-size:22px;padding:8px 14px;
-        border-radius:9px;min-width:52px;text-align:center}
+        border-radius:9px;min-width:52px;text-align:center;cursor:pointer;
+        position:relative;user-select:none;transition:background .12s}
+  .chip:active{transform:scale(.96)}
+  .chip.done{background:#8b1d18;color:#ffd7d4;text-decoration:line-through}
+  .chip .who{display:block;font-size:9px;font-weight:600;letter-spacing:.3px;
+             text-decoration:none;opacity:.85;margin-top:1px;max-width:70px;
+             overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip.pend{opacity:.55}
   .grp{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
   .grp:first-child{border-top:0;padding-top:0;margin-top:0}
   .gt{font-size:12px;color:var(--accent);font-weight:700}
@@ -93,16 +100,18 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <div id="gatePin" class="hide">
       <label>PIN</label><input id="inPin" type="password" inputmode="numeric" autocomplete="off">
     </div>
+    <label>Your name (shown to the others)</label>
+    <input id="inName" placeholder="e.g. Aalish" autocomplete="off">
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
-    <div class="hint">Read-only. Nothing is stored on this device.</div>
-    <div class="ver">V5</div>
+    <div class="hint">Ticks are shared with everyone scanning. Nothing is stored on this device.</div>
+    <div class="ver">V6</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V5</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V6</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
   </div>
@@ -141,7 +150,8 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
 const $=id=>document.getElementById(id);
 const S={url:'',token:'',index:null,tabs:null,worker:null,busy:false,
          lastKey:'',lastAt:0,cycles:0,wide:false,detector:null,seen:new Set(),
-         streakKey:'',streak:0,streakAt:0};
+         streakKey:'',streak:0,streakAt:0,
+         user:'',done:{},lastRender:null};
 
 const RESCAN_MS = 4000;   // after this, the same label may be reported again
 
@@ -155,6 +165,7 @@ function showGate(){
 }
 $('btnGo').onclick=()=>{
   $('gateErr').textContent='';
+  S.user=($('inName').value||'').trim().slice(0,18);
   if(CONFIG.apiUrl&&CONFIG.token){
     if(CONFIG.pin&&$('inPin').value!==CONFIG.pin){$('gateErr').textContent='Wrong PIN.';return;}
     start(CONFIG.apiUrl,CONFIG.token);
@@ -202,6 +213,9 @@ async function start(url,token){
     $('gateErr').textContent='Could not reach the sheet ('+e.message+').';
     return;
   }
+  if(!S.user) S.user='phone '+Math.floor(Math.random()*90+10);
+  pollProgress();
+  setInterval(pollProgress, 5000);
   await initCamera();
   initBarcode();
   initOcr();               // not awaited: barcode scanning starts immediately
@@ -366,30 +380,36 @@ const strip=s=>{const t=s.replace(/^0+/,'');return t===''?'0':t;};
  */
 function readings(tok){
   const out=[], seen=new Set();
+  const push=(pref,tail,sufChar,sufAt)=>{
+    const sig=pref+'|'+tail+'|'+sufChar+sufAt;
+    if(!seen.has(sig)){ seen.add(sig); out.push({pref:pref,dg:tail,suf:sufChar,at:sufAt}); }
+  };
   for(let n=0;n<=5 && n<=tok.length;n++){
     const pref=tok.slice(0,n), rawTail=tok.slice(n);
     if(!/^[A-Z]*$/.test(pref)) break;      // prefix must be letters only
     if(!rawTail) continue;
+
+    // (a) the whole tail reads as digits
     const tail=digitize(rawTail);
-    if(!/^[0-9]+$/.test(tail)) continue;
-    const subs=(rawTail.match(/[A-Z]/g)||[]).length;
-    // A tail that was already all digits can be short (a typed number or a
-    // bare barcode). A tail we had to letter-substitute must look like a real
-    // printed code, or ordinary words such as PALAZZO turn into numbers.
-    const ok = subs===0 ? tail.length>=3
-                        : (tail.length>=8 && subs/tail.length<=0.4);
-    if(!ok) continue;
-    const sig=pref+'|'+tail;
-    if(!seen.has(sig)){ seen.add(sig); out.push([pref,tail]); }
+    if(/^[0-9]+$/.test(tail)){
+      const subs=(rawTail.match(/[A-Z]/g)||[]).length;
+      const ok = subs===0 ? tail.length>=3 : (tail.length>=8 && subs/tail.length<=0.4);
+      if(ok) push(pref,tail,'',-1);
+    }
+
+    // (b) one letter survives inside the tail - a D.No. suffix such as 3263A.
+    //     Remove it, remember where it sat, and let the loop below decide
+    //     whether the D.No. actually ends there.
+    const letters=[...rawTail].map((c,i)=>[c,i]).filter(([c])=>/[A-Z]/.test(c));
+    if(letters.length===1 && letters[0][1]>=3){
+      const at=letters[0][1], ch=letters[0][0];
+      const cut=digitize(rawTail.slice(0,at))+digitize(rawTail.slice(at+1));
+      if(/^[0-9]{8,}$/.test(cut)) push(pref,cut,ch,at);
+    }
   }
   return out;
 }
 
-/**
- * Build scored candidates. A window scores higher when it sits where a D.No.
- * normally sits, when the vendor letters point at the same tab, and when the
- * surrounding run looks like a full product code.
- */
 /**
  * Do these leading letters name this tab?  AMY↔AM, VAL↔BVAL, HAZ↔CHAZ, AAR↔CAAR
  * — the packing slip drops the first letter of the tab name.
@@ -417,9 +437,8 @@ function knownVendor(pref){
 function candidates(text,strict){
   const clean=deOcr(text);
   const out=new Map();
-  const add=(key,score,why,ctx)=>{
-    if(!/^\d+$/.test(key)) return;
-    const rows=S.index[key];
+  const add=(key,score,why,ctx,rowsIn)=>{
+    const rows=rowsIn||S.index[key];
     if(!rows||!rows.length) return;
     const prev=out.get(key);
     if(!prev||score>prev.score) out.set(key,{key,score,why,ctx,rows});
@@ -435,7 +454,8 @@ function candidates(text,strict){
     if(toks.length>1) joined.push(toks.join(''));
     let reason='';
     for(const tok of toks.concat(joined)){
-      for(const [pref,dg] of readings(tok)){
+      for(const rd of readings(tok)){
+        const pref=rd.pref, dg=rd.dg;
         if(!pref || pref.length>5){ reason=reason||'no designer letters'; continue; }
         if(!knownVendor(pref)){ reason=reason||'unknown designer "'+pref+'"'; continue; }
         if(dg.length<MIN_DIGITS){ reason=reason||'partial code ('+dg.length+' digits, need '+MIN_DIGITS+')'; continue; }
@@ -453,8 +473,17 @@ function candidates(text,strict){
           if(k.length<=2 && !monthOK){
             reason=reason||'short D.No. '+k+' not followed by a month'; continue;
           }
-          const onVendorTab=rows.filter(r=>vendorMatches(pref,r.t));
+          let onVendorTab=rows.filter(r=>vendorMatches(pref,r.t));
           if(!onVendorTab.length){ reason=reason||'D.No. '+k+' is not on '+pref+"'s tab"; continue; }
+
+          // A D.No. may carry a letter: BRUD has both 3263 and 3263A. The
+          // suffix counts only when the letter sat exactly where this D.No.
+          // ends. No letter there means keep the plain numeric variant.
+          const suffix = (rd.at === 3+len) ? rd.suf : '';
+          if(rd.suf && rd.at !== 3+len) continue;   // letter is elsewhere: wrong cut
+          const tailOf=r=>{ const m=String(r.dn||'').toUpperCase().match(/([A-Z]+)$/); return m?m[1]:''; };
+          const exact=onVendorTab.filter(r=> suffix ? tailOf(r)===suffix : tailOf(r)==='');
+          if(exact.length) onVendorTab=exact;
           // Only one letter survived the glare. Accept it, but only when it
           // points at a single designer - otherwise we would be guessing which.
           if(pref.length<2){
@@ -463,19 +492,13 @@ function candidates(text,strict){
               reason=reason||'only one designer letter readable'; continue;
             }
           }
-          add(k, 100 + k.length*4 + (monthOK?30:0),
-              'D.No. after serial, '+k.length+' digit'+(k.length===1?'':'s')+
-              (monthOK?', month '+after:'')+', '+onVendorTab[0].t+' confirmed', tok);
+          add(k+(suffix||''), 100 + k.length*4 + (monthOK?30:0) + (suffix?10:0),
+              'D.No. '+k+(suffix||'')+' after serial'+(monthOK?', month '+after:'')+
+              ', '+onVendorTab[0].t+' confirmed', tok, onVendorTab);
         }
       }
     }
     const list=[...out.values()].sort((a,b)=>b.score-a.score);
-    // keep only rows belonging to the designer that was actually read
-    for(const c of list){
-      const p=(c.ctx.match(/^[A-Z]+/)||[''])[0];
-      const only=c.rows.filter(r=>vendorMatches(p,r.t));
-      if(only.length) c.rows=only;
-    }
     list.reason=reason;
     return list;
   }
@@ -591,6 +614,53 @@ function consider(text, fromBarcode){
   render(text,best,cs.slice(1,5));
 }
 
+/* ------------------------------------------------- shared progress ("done") */
+const dkey=(t,ser)=>String(t).toUpperCase()+'|'+String(ser).trim();
+
+async function pollProgress(){
+  try{
+    const r=await api({action:'progress'});
+    if(r&&r.ok&&r.done){ S.done=r.done; paintDone(); }
+  }catch(e){}
+}
+
+/** Repaint tick state without rebuilding the result, so a scan is not lost. */
+function paintDone(){
+  document.querySelectorAll('.chip[data-k]').forEach(el=>{
+    if(el.classList.contains('pend')) return;          // a click is still in flight
+    const rec=S.done[el.getAttribute('data-k')];
+    el.classList.toggle('done', !!rec);
+    const w=el.querySelector('.who');
+    if(w) w.textContent = rec ? (rec.u||'done') : '';
+  });
+  const chips=[...document.querySelectorAll('.chip[data-k]')];
+  if(chips.length){
+    const n=chips.filter(c=>c.classList.contains('done')).length;
+    $('meta').textContent=$('meta').textContent.replace(/\s*·\s*\d+ of \d+ done$/,'')+
+                          '  ·  '+n+' of '+chips.length+' done';
+  }
+}
+
+async function toggleDone(el){
+  const k=el.getAttribute('data-k');
+  const wasDone=!!S.done[k];
+  const tab=el.getAttribute('data-tab'), ser=el.getAttribute('data-ser'), dno=el.getAttribute('data-dno');
+  // optimistic: colour it now, confirm with the server after
+  el.classList.add('pend');
+  el.classList.toggle('done', !wasDone);
+  const w=el.querySelector('.who'); if(w) w.textContent = wasDone ? '' : S.user;
+  try{
+    const r=await api({action:'mark',tab:tab,serial:ser,dno:dno,done:wasDone?'0':'1',user:S.user});
+    if(r&&r.ok&&r.done) S.done=r.done;
+  }catch(e){
+    el.classList.toggle('done', wasDone);              // put it back if the write failed
+    $('live').textContent='could not save that tick - check the connection';
+  }
+  el.classList.remove('pend');
+  paintDone();
+  beep(wasDone?300:620,70);
+}
+
 /* ---------------------------------------------------------------- render */
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function render(raw,best,alts){
@@ -604,9 +674,13 @@ function render(raw,best,alts){
     const rs=byTab[t].slice().sort((a,b)=>Number(a.s)-Number(b.s));
     html+='<div class="grp"><div class="gt">'+esc(t)+' · '+esc(rs[0].d)+' · '+rs.length+
           ' pc</div><div class="serials">'+
-          rs.map(x=>'<div class="chip">'+esc(x.s)+'</div>').join('')+'</div></div>';
+          rs.map(x=>'<div class="chip" data-k="'+esc(dkey(x.t,x.s))+'" data-tab="'+esc(x.t)+
+                    '" data-ser="'+esc(x.s)+'" data-dno="'+esc(x.dn||best.key)+'">'+esc(x.s)+
+                    '<span class="who"></span></div>').join('')+'</div></div>';
   }
   $('out').innerHTML=html;
+  [...$('out').querySelectorAll('.chip[data-k]')].forEach(c=>c.onclick=()=>toggleDone(c));
+  paintDone();
   $('alts').innerHTML = alts.length
     ? 'Other possible readings: '+alts.map(a=>'<b data-k="'+esc(a.key)+'">'+esc(a.key)+
       ' ('+a.rows.length+')</b>').join('')
