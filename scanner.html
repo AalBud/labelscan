@@ -96,13 +96,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Read-only. Nothing is stored on this device.</div>
-    <div class="ver">V3</div>
+    <div class="ver">V4</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V3</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V4</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
   </div>
@@ -141,7 +141,7 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
 const $=id=>document.getElementById(id);
 const S={url:'',token:'',index:null,tabs:null,worker:null,busy:false,
          lastKey:'',lastAt:0,cycles:0,wide:false,detector:null,seen:new Set(),
-         streakKey:'',streak:0};
+         streakKey:'',streak:0,streakAt:0};
 
 const RESCAN_MS = 4000;   // after this, the same label may be reported again
 
@@ -253,27 +253,79 @@ async function initOcr(){
   }catch(e){ setStatus('OCR failed','err'); }
 }
 
-function grabFrame(wide){
+/**
+ * Four ways of preparing the same frame. One global threshold fails the moment
+ * a corner is in glare and another in shadow, so each cycle uses a different
+ * treatment and the loop keeps whichever one produces a valid read.
+ *   0  local (adaptive) threshold, tight window - uneven light, glare
+ *   1  local threshold, wide window             - soft shadow, low contrast
+ *   2  grey with contrast stretched             - blurry or faint print
+ *   3  Otsu, single global cut                  - clean, evenly lit labels
+ */
+const VARIANTS=['local-tight','local-wide','contrast','otsu'];
+
+function grabFrame(wide,mode){
   const v=$('vid'); if(!v.videoWidth) return null;
-  const g = wide ? {x:0,y:0,w:1,h:1} : {x:0.04,y:0.30,w:0.92,h:0.40};
+  const g = wide ? {x:0.00,y:0.12,w:1.00,h:0.76} : {x:0.03,y:0.27,w:0.94,h:0.46};
   const sx=v.videoWidth*g.x, sw=v.videoWidth*g.w;
   const sy=v.videoHeight*g.y, sh=v.videoHeight*g.h;
   const cv=$('cv');
-  const target=1000;                              // cap the work so phones keep up
-  const scale=Math.min(2.5, Math.max(1, target/sw));
-  cv.width=Math.round(sw*scale); cv.height=Math.round(sh*scale);
+  const target=1400;                       // small print needs the extra pixels
+  const scale=Math.min(3, Math.max(1, target/sw));
+  const W=cv.width=Math.round(sw*scale), H=cv.height=Math.round(sh*scale);
   const c=cv.getContext('2d',{willReadFrequently:true});
-  c.drawImage(v,sx,sy,sw,sh,0,0,cv.width,cv.height);
-  const img=c.getImageData(0,0,cv.width,cv.height),d=img.data;
-  let sum=0;
-  for(let i=0;i<d.length;i+=4){
+  c.drawImage(v,sx,sy,sw,sh,0,0,W,H);
+  const img=c.getImageData(0,0,W,H), d=img.data;
+
+  const grey=new Float32Array(W*H);
+  let mn=255,mx=0;
+  for(let i=0,p=0;i<d.length;i+=4,p++){
     const g2=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
-    d[i]=d[i+1]=d[i+2]=g2; sum+=g2;
+    grey[p]=g2; if(g2<mn)mn=g2; if(g2>mx)mx=g2;
   }
-  const mid=sum/(d.length/4);
-  for(let i=0;i<d.length;i+=4){
-    const t=d[i]>mid*0.95?255:0;                  // hard threshold: printed black on white
-    d[i]=d[i+1]=d[i+2]=t;
+  const put=o=>{ for(let i=0,p=0;i<d.length;i+=4,p++){ const t=o[p]; d[i]=d[i+1]=d[i+2]=t; } };
+
+  if(mode===2){                                   // contrast stretch, keep greys
+    const range=Math.max(1,mx-mn), o=new Float32Array(W*H);
+    for(let p=0;p<grey.length;p++) o[p]=Math.max(0,Math.min(255,(grey[p]-mn)*255/range));
+    put(o);
+  }else if(mode===3){                             // Otsu
+    const hist=new Array(256).fill(0);
+    for(let p=0;p<grey.length;p++) hist[grey[p]|0]++;
+    const tot=grey.length; let sum=0; for(let t=0;t<256;t++) sum+=t*hist[t];
+    let sumB=0,wB=0,best=0,thr=128;
+    for(let t=0;t<256;t++){
+      wB+=hist[t]; if(!wB) continue;
+      const wF=tot-wB; if(!wF) break;
+      sumB+=t*hist[t];
+      const mB=sumB/wB, mF=(sum-sumB)/wF, bet=wB*wF*(mB-mF)*(mB-mF);
+      if(bet>best){best=bet;thr=t;}
+    }
+    const o=new Float32Array(W*H);
+    for(let p=0;p<grey.length;p++) o[p]=grey[p]>thr?255:0;
+    put(o);
+  }else{                                          // adaptive local mean, integral image
+    const rad=Math.max(8, Math.round(W/(mode===0?26:11)));
+    const ii=new Float64Array((W+1)*(H+1));
+    for(let y=0;y<H;y++){
+      let row=0;
+      for(let x=0;x<W;x++){
+        row+=grey[y*W+x];
+        ii[(y+1)*(W+1)+(x+1)] = ii[y*(W+1)+(x+1)] + row;
+      }
+    }
+    const o=new Float32Array(W*H);
+    for(let y=0;y<H;y++){
+      const y0=Math.max(0,y-rad), y1=Math.min(H-1,y+rad);
+      for(let x=0;x<W;x++){
+        const x0=Math.max(0,x-rad), x1=Math.min(W-1,x+rad);
+        const area=(x1-x0+1)*(y1-y0+1);
+        const ssum = ii[(y1+1)*(W+1)+(x1+1)] - ii[y0*(W+1)+(x1+1)]
+                   - ii[(y1+1)*(W+1)+x0]     + ii[y0*(W+1)+x0];
+        o[y*W+x] = grey[y*W+x]*area > ssum*0.92 ? 255 : 0;   // 8% under local mean = ink
+      }
+    }
+    put(o);
   }
   c.putImageData(img,0,0);
   return cv;
@@ -291,8 +343,8 @@ function grabFrame(wide){
    Random noise off a table cannot satisfy all four, which is what stops the
    phone inventing results when it is put face down.
    ======================================================================== */
-const MIN_DIGITS   = 13;   // shortest genuine code seen in the data is 15
-const MIN_CONF     = 55;   // Tesseract confidence floor
+const MIN_DIGITS   = 8;    // relaxed: the vendor/tab cross-check below is the real guard
+const MIN_CONF     = 28;   // low bar - a wrong read fails validation anyway
 const CONFIRM_READS= 2;    // identical result needed this many frames running
 
 /** Tidy separators only. Character substitution happens per interpretation. */
@@ -345,8 +397,11 @@ function readings(tok){
 function vendorMatches(pref,tab){
   if(!pref||!tab) return false;
   const P=pref.toUpperCase(), T=tab.toUpperCase(), T1=T.slice(1);
-  return P===T || T.startsWith(P) || P.startsWith(T) ||
-         P===T1 || T1.startsWith(P) || (T1.length>1 && P.startsWith(T1));
+  if(P===T || T.startsWith(P) || P.startsWith(T)) return true;
+  if(P===T1 || T1.startsWith(P) || (T1.length>1 && P.startsWith(T1))) return true;
+  // a clipped first character: "AL" off a glary "PAL"
+  if(P.length>=1 && (T.endsWith(P) || T1.endsWith(P))) return true;
+  return false;
 }
 function knownVendor(pref){
   if(!S.tabs) return true;
@@ -373,12 +428,15 @@ function candidates(text,strict){
     // ---- the disciplined path: structure must hold, no guessing
     const toks=clean.split(/\s+/).filter(Boolean);
     const joined=[];
-    for(let i=0;i<toks.length-1;i++) joined.push(toks[i]+toks[i+1]);
-    for(let i=0;i<toks.length-2;i++) joined.push(toks[i]+toks[i+1]+toks[i+2]);
+    // OCR breaks a printed code at every space, so try every run of adjacent
+    // tokens up to six long, plus the whole line with the spaces removed
+    for(let len=2;len<=6;len++)
+      for(let i=0;i+len<=toks.length;i++) joined.push(toks.slice(i,i+len).join(''));
+    if(toks.length>1) joined.push(toks.join(''));
     let reason='';
     for(const tok of toks.concat(joined)){
       for(const [pref,dg] of readings(tok)){
-        if(!pref || pref.length<2 || pref.length>5){ reason=reason||'no designer letters'; continue; }
+        if(!pref || pref.length>5){ reason=reason||'no designer letters'; continue; }
         if(!knownVendor(pref)){ reason=reason||'unknown designer "'+pref+'"'; continue; }
         if(dg.length<MIN_DIGITS){ reason=reason||'partial code ('+dg.length+' digits, need '+MIN_DIGITS+')'; continue; }
         // D.No. only ever starts right after the 3-digit serial
@@ -388,6 +446,14 @@ function candidates(text,strict){
           if(!rows) continue;
           const onVendorTab=rows.filter(r=>vendorMatches(pref,r.t));
           if(!onVendorTab.length){ reason=reason||'D.No. '+k+' is not on '+pref+"'s tab"; continue; }
+          // Only one letter survived the glare. Accept it, but only when it
+          // points at a single designer - otherwise we would be guessing which.
+          if(pref.length<2){
+            const tabs=new Set(onVendorTab.map(r=>r.t));
+            if(tabs.size!==1 || dg.length<15){
+              reason=reason||'only one designer letter readable'; continue;
+            }
+          }
           add(k, 100+k.length*4, 'D.No. after serial, '+k.length+' digits, '+
                                  onVendorTab[0].t+' confirmed', tok);
         }
@@ -454,8 +520,9 @@ async function loop(){
         }catch(e){}
       }
       // 2. otherwise OCR the guide box (or the whole frame if asked)
+      const mode=S.cycles%4;
       if(!text && S.worker){
-        const cv=grabFrame(S.wide);
+        const cv=grabFrame(S.wide,mode);
         if(cv){
           const {data}=await S.worker.recognize(cv);
           text=(data&&data.text)||''; conf=(data&&data.confidence)||0; via='ocr';
@@ -463,15 +530,14 @@ async function loop(){
       }
       S.cycles++;
       const flat=text.replace(/\s+/g,' ').trim();
-      $('tick').textContent='#'+S.cycles+' · '+(Date.now()-t0)+'ms';
+      $('tick').textContent=VARIANTS[mode]+' · '+(Date.now()-t0)+'ms';
+      if(Date.now()-S.streakAt>6000){ S.streakKey=''; S.streak=0; }
       if(via==='ocr' && conf && conf<MIN_CONF){
-        $('live').textContent='low confidence '+Math.round(conf)+'% — hold steadier';
-        S.streakKey=''; S.streak=0;
+        $('live').textContent=VARIANTS[mode]+': faint ('+Math.round(conf)+'%)';
       }else if(flat){
         consider(flat, via==='barcode');
       }else{
-        $('live').textContent='(nothing readable)';
-        S.streakKey=''; S.streak=0;
+        $('live').textContent=VARIANTS[mode]+': nothing readable';
       }
     }
   }catch(e){
@@ -495,14 +561,14 @@ function watchdog(){
 function consider(text, fromBarcode){
   const cs=candidates(text, !fromBarcode);
   if(!cs.length){
-    $('live').textContent = (cs.reason ? 'rejected: '+cs.reason : 'no designer code in view')+
-                            '  ·  '+text.slice(0,40);
-    S.streakKey=''; S.streak=0;
-    return;
+    $('live').textContent = (cs.reason ? 'rejected: '+cs.reason : 'no code in view')+
+                            '  ·  '+text.slice(0,36);
+    return;                       // keep the streak: another variant may still land
   }
   const best=cs[0];
   // must read the same thing CONFIRM_READS frames running before it counts
   if(best.key===S.streakKey){ S.streak++; } else { S.streakKey=best.key; S.streak=1; }
+  S.streakAt=Date.now();
   const need = fromBarcode ? 1 : CONFIRM_READS;
   if(S.streak<need){
     $('live').textContent='confirming '+best.key+'  ('+S.streak+'/'+need+')';
@@ -560,7 +626,7 @@ function beep(f,ms){try{ac=ac||new(window.AudioContext||window.webkitAudioContex
 
 /* --------------------------------------------------------------- buttons */
 $('btnClear').onclick=()=>{
-  S.lastKey='';S.lastAt=0;S.streakKey='';S.streak=0;
+  S.lastKey='';S.lastAt=0;S.streakKey='';S.streak=0;S.streakAt=0;
   $('raw').textContent='—';$('dno').className='dno none';$('dno').textContent='point at a label';
   $('meta').textContent='';$('out').innerHTML='';$('alts').innerHTML='';
 };
