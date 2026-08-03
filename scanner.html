@@ -70,6 +70,21 @@
   .ruler span{flex:1 1 0;min-width:0;text-align:center;font:9px ui-monospace,Menlo,monospace;color:#4a545f}
   .batchset{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim)}
   .batchset input{width:52px;padding:3px 6px;font-size:12px;text-align:center}
+  .chip.hold{background:#5a4409;color:#ffe8a3;text-decoration:none;
+             box-shadow:0 0 0 1px #d29922 inset}
+  .seg.hit.hold{background:#5a4409;border-color:#d29922;color:#ffe8a3}
+  .warn{margin-top:10px;padding:11px 13px;border-radius:9px;background:#4a2c05;
+        border:1px solid #d29922;color:#ffe8a3;font-weight:700;font-size:15px}
+  .warn small{display:block;font-weight:500;font-size:12px;opacity:.9;margin-top:3px}
+  .setup{margin-top:10px;background:var(--panel);border:1px solid var(--line);
+         border-radius:12px;padding:12px}
+  .setup textarea{width:100%;min-height:64px;padding:9px;border-radius:8px;
+        border:1px solid var(--line);background:#0d1117;color:var(--txt);
+        font:12px ui-monospace,Menlo,monospace;resize:vertical}
+  .setup .row{display:flex;gap:8px;align-items:flex-end;margin-top:8px}
+  .setup button{padding:9px 14px;border:0;border-radius:8px;background:var(--accent);
+        color:#04121f;font-weight:700;font-size:13px}
+  .setup .note{font-size:11px;color:var(--dim);margin-top:4px;line-height:1.45}
   .alts{margin-top:9px;font-size:12px;color:var(--dim)}
   .alts b{color:var(--txt);cursor:pointer;border-bottom:1px dotted var(--dim);margin-right:9px}
 
@@ -120,18 +135,17 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. Nothing is stored on this device.</div>
-    <div class="ver">V8</div>
+    <div class="ver">V9</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V8</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V9</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
-    <span class="pill batchset">strip of
-      <input id="inBatch" type="number" min="1" max="200" value="20" inputmode="numeric">
-    </span>
+    <span class="pill batchset" id="stripInfo">strips: 20</span>
+    <button class="pill" id="btnSetup" style="cursor:pointer">Setup</button>
   </div>
 
   <div class="cam">
@@ -155,6 +169,21 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <div class="alts" id="alts"></div>
   </div>
 
+  <div class="setup hide" id="setup">
+    <label>Stickers per strip</label>
+    <textarea id="inStrips" spellcheck="false">20</textarea>
+    <div class="note">One figure for every strip the same (<b>20</b>), or a list when they
+      differ (<b>10,12,20</b> = first strip 10, second 12, then 20 for the rest).</div>
+    <label style="margin-top:10px">On hold — serials not approved yet</label>
+    <textarea id="inHolds" spellcheck="false" placeholder="TH 96-118, 170-189"></textarea>
+    <div class="note">One designer per line, e.g. <b>TH 96-118, 170-189</b>. Scanning a held
+      serial shows a warning instead of letting it through.</div>
+    <div class="row">
+      <button id="btnSaveSetup">Save for everyone</button>
+      <span class="note" id="setupMsg" style="margin:0"></span>
+    </div>
+  </div>
+
   <h2>Recent scans</h2>
   <table>
     <thead><tr><th>Time</th><th>D.No.</th><th>Tab</th><th>Serials</th></tr></thead>
@@ -170,7 +199,7 @@ const $=id=>document.getElementById(id);
 const S={url:'',token:'',index:null,tabs:null,worker:null,busy:false,
          lastKey:'',lastAt:0,cycles:0,wide:false,detector:null,seen:new Set(),
          streakKey:'',streak:0,streakAt:0,
-         user:'',done:{},lastRender:null};
+         user:'',done:{},lastRender:null,cfg:{strips:'20',holds:''},holds:{}};
 
 const RESCAN_MS = 4000;   // after this, the same label may be reported again
 
@@ -233,8 +262,10 @@ async function start(url,token){
     return;
   }
   if(!S.user) S.user='phone '+Math.floor(Math.random()*90+10);
+  await pullSettings();
   pollProgress();
   setInterval(pollProgress, 5000);
+  setInterval(pullSettings, 30000);
   await initCamera();
   initBarcode();
   initOcr();               // not awaited: barcode scanning starts immediately
@@ -636,6 +667,38 @@ function consider(text, fromBarcode){
   render(text,best,cs.slice(1,5));
 }
 
+/* ------------------------------------------------------ shared setup */
+async function pullSettings(){
+  try{
+    const r=await api({action:'settings'});
+    if(r&&r.ok&&r.settings){
+      S.cfg=r.settings;
+      S.holds=parseHolds(S.cfg.holds);
+      $('inStrips').value=S.cfg.strips||'20';
+      $('inHolds').value=S.cfg.holds||'';
+      const sz=stripSizes();
+      $('stripInfo').textContent='strips: '+(sz.length===1?sz[0]:sz.join(', ')+'…');
+      if(S.lastRender) render(...S.lastRender);
+    }
+  }catch(e){}
+}
+$('btnSetup').onclick=()=>$('setup').classList.toggle('hide');
+$('btnSaveSetup').onclick=async ()=>{
+  $('setupMsg').textContent='saving…';
+  try{
+    const r=await api({action:'setsettings',strips:$('inStrips').value.trim(),
+                       holds:$('inHolds').value.trim(),user:S.user});
+    if(r&&r.ok){
+      S.cfg=r.settings; S.holds=parseHolds(S.cfg.holds);
+      const sz=stripSizes();
+      $('stripInfo').textContent='strips: '+(sz.length===1?sz[0]:sz.join(', ')+'…');
+      $('setupMsg').textContent='saved — everyone sees this';
+      if(S.lastRender) render(...S.lastRender);
+    }else $('setupMsg').textContent='save failed';
+  }catch(e){ $('setupMsg').textContent='save failed ('+e.message+')'; }
+  setTimeout(()=>$('setupMsg').textContent='',4000);
+};
+
 /* ------------------------------------------------- shared progress ("done") */
 const dkey=(t,ser)=>String(t).toUpperCase()+'|'+String(ser).trim();
 
@@ -694,28 +757,73 @@ async function toggleDone(el){
    so a nine-piece design shows as one cluster you can peel in a single pass
    instead of nine separate hunts.
    ======================================================================== */
-function batchSize(){
-  const v=parseInt($('inBatch').value,10);
-  return (v&&v>0&&v<=200)?v:20;
+/** "20" -> every strip 20.   "10,12,20" -> 10, then 12, then 20 for the rest. */
+function stripSizes(){
+  const raw=String(S.cfg.strips||'20');
+  const list=raw.split(/[,\s]+/).map(x=>parseInt(x,10)).filter(x=>x>0&&x<=500);
+  return list.length?list:[20];
 }
+/** Walk the strips until the serial falls inside one. */
 function slotOf(serial){
-  const n=Number(serial), B=batchSize();
+  const n=Number(serial);
   if(!isFinite(n)||n<1) return null;
-  return { strip: Math.floor((n-1)/B)+1, slot: ((n-1)%B)+1, of: B };
+  const sz=stripSizes();
+  let left=n, i=0;
+  while(i<5000){
+    const size=sz[Math.min(i,sz.length-1)];
+    if(left<=size) return {strip:i+1, slot:left, of:size};
+    left-=size; i++;
+  }
+  return null;
+}
+
+/**
+ * Serial ranges that are not approved yet, written one designer to a line:
+ *     TH 96-118, 170-189
+ *     BRUD 5-10
+ * A single serial is fine too (TH 44). Scanning one shows a warning instead
+ * of quietly handing over a sticker number nobody should be using.
+ */
+function parseHolds(txt){
+  const out={};
+  String(txt||'').split(/[\n;]+/).forEach(line=>{
+    const m=line.trim().match(/^([A-Za-z][A-Za-z0-9 _-]*?)\s+(.+)$/);
+    if(!m) return;
+    const tab=m[1].trim().toUpperCase(), spans=[];
+    m[2].split(',').forEach(part=>{
+      const r=part.trim().match(/^(\d+)\s*(?:[-–—to]+\s*(\d+))?$/i);
+      if(!r) return;
+      const a=+r[1], b=r[2]?+r[2]:a;
+      spans.push([Math.min(a,b),Math.max(a,b)]);
+    });
+    if(spans.length) out[tab]=(out[tab]||[]).concat(spans);
+  });
+  return out;
+}
+function isHeld(tab,serial){
+  const spans=S.holds[String(tab).toUpperCase()];
+  if(!spans) return false;
+  const n=Number(serial);
+  return spans.some(([a,b])=>n>=a&&n<=b);
+}
+function holdSummary(){
+  const t=Object.keys(S.holds);
+  if(!t.length) return '';
+  return t.map(k=>k+' '+S.holds[k].map(([a,b])=>a===b?a:a+'-'+b).join(', ')).join(' · ');
 }
 
 function buildMap(rowsByTab){
-  const B=batchSize();
   let html='';
   for(const tab of Object.keys(rowsByTab).sort()){
     // group this tab's pieces by which strip they sit on
     const strips={};
     for(const r of rowsByTab[tab]){
       const p=slotOf(r.s); if(!p) continue;
-      (strips[p.strip]=strips[p.strip]||[]).push({slot:p.slot,row:r});
+      (strips[p.strip]=strips[p.strip]||[]).push({slot:p.slot,row:r,size:p.of});
     }
     for(const sn of Object.keys(strips).sort((a,b)=>a-b)){
       const hits=strips[sn];
+      const B=hits[0].size||20;
       const bySlot={}; hits.forEach(h=>bySlot[h.slot]=h.row);
       const slots=hits.map(h=>h.slot).sort((a,b)=>a-b);
       const rangeTxt = slots.length===1 ? '#'+slots[0]
@@ -727,7 +835,8 @@ function buildMap(rowsByTab){
       for(let i=1;i<=B;i++){
         const row=bySlot[i];
         if(row){
-          html+='<div class="seg hit" data-k="'+esc(dkey(row.t,row.s))+'" data-tab="'+
+          html+='<div class="seg hit'+(isHeld(row.t,row.s)?' hold':'')+
+                '" data-k="'+esc(dkey(row.t,row.s))+'" data-tab="'+
                 esc(row.t)+'" data-ser="'+esc(row.s)+'" data-dno="'+esc(row.dn||'')+
                 '" title="serial '+esc(row.s)+'">'+i+'</div>';
         }else{
@@ -756,12 +865,23 @@ function render(raw,best,alts){
     const rs=byTab[t].slice().sort((a,b)=>Number(a.s)-Number(b.s));
     html+='<div class="grp"><div class="gt">'+esc(t)+' · '+esc(rs[0].d)+' · '+rs.length+
           ' pc</div><div class="serials">'+
-          rs.map(x=>'<div class="chip" data-k="'+esc(dkey(x.t,x.s))+'" data-tab="'+esc(x.t)+
+          rs.map(x=>'<div class="chip'+(isHeld(x.t,x.s)?' hold':'')+'" data-k="'+
+                    esc(dkey(x.t,x.s))+'" data-tab="'+esc(x.t)+
                     '" data-ser="'+esc(x.s)+'" data-dno="'+esc(x.dn||best.key)+'">'+esc(x.s)+
                     '<span class="who"></span></div>').join('')+'</div></div>';
   }
+  const held=best.rows.filter(r=>isHeld(r.t,r.s));
+  if(held.length){
+    const all=held.length===best.rows.length;
+    html = '<div class="warn">'+(all?'ON HOLD — not approved yet':
+            held.length+' of '+best.rows.length+' serials are on hold')+
+           '<small>'+(all?'Skip this one. ':'Only the green ones are cleared. ')+
+           'Serial'+(held.length===1?' ':'s ')+held.map(r=>r.s).join(', ')+
+           ' fall inside a hold range for '+esc(held[0].t)+'.</small></div>' + html;
+  }
   $('out').innerHTML=html;
   $('map').innerHTML=buildMap(byTab);
+  if(held.length) beep(200,260);
   [...document.querySelectorAll('.chip[data-k],.seg.hit[data-k]')]
       .forEach(c=>c.onclick=()=>toggleDone(c));
   paintDone();
