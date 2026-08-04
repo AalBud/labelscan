@@ -141,13 +141,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. Nothing is stored on this device.</div>
-    <div class="ver">V13</div>
+    <div class="ver">V14</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V13</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V14</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
     <span class="pill batchset" id="stripInfo">strips: 20</span>
@@ -505,10 +505,12 @@ function readings(tok){
  */
 function vendorMatches(pref,tab){
   if(!pref||!tab) return false;
-  // A tab may be called "SA (2)" to sit beside "SA"; the barcode carries the
-  // stripped form "SA2", so compare on that.
-  const P=String(pref).toUpperCase().replace(/[^A-Z0-9]/g,'');
-  const T=String(tab).toUpperCase().replace(/[^A-Z0-9]/g,'');
+  // A tab may be called "SA (2)" only so it can sit beside "SA". The "(2)" is
+  // bookkeeping, not part of the designer, so both tabs answer to SA.
+  const base=x=>String(x).toUpperCase()
+                  .replace(/\s*\(\s*\d+\s*\)\s*$/,'')
+                  .replace(/[^A-Z0-9]/g,'');
+  const P=base(pref), T=base(tab);
   const T1=T.slice(1);
   if(!P||!T) return false;
   if(P===T || T.startsWith(P) || P.startsWith(T)) return true;
