@@ -70,6 +70,12 @@
   .ruler span{flex:1 1 0;min-width:0;text-align:center;font:9px ui-monospace,Menlo,monospace;color:#4a545f}
   .batchset{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim)}
   .batchset input{width:52px;padding:3px 6px;font-size:12px;text-align:center}
+  .chip.dup,.seg.hit.dup{box-shadow:0 0 0 3px #58a6ff inset}
+  .chip.dup:not(.done):not(.hold){background:#1b4b91;color:#dbeafe}
+  .seg.hit.dup:not(.done):not(.hold){background:#1b4b91;border-color:#58a6ff;color:#dbeafe}
+  .dupnote{margin-top:9px;padding:9px 11px;border-radius:8px;background:#12233f;
+           border:1px solid #1f6feb;color:#cfe4ff;font-size:12px;line-height:1.5}
+  .dupnote b{color:#fff}
   .chip.hold{background:#5a4409;color:#ffe8a3;text-decoration:none;
              box-shadow:0 0 0 1px #d29922 inset}
   .seg.hit.hold{background:#5a4409;border-color:#d29922;color:#ffe8a3}
@@ -135,13 +141,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. Nothing is stored on this device.</div>
-    <div class="ver">V11</div>
+    <div class="ver">V13</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V11</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V13</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
     <span class="pill batchset" id="stripInfo">strips: 20</span>
@@ -165,6 +171,7 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <div class="dno none" id="dno">point at a label</div>
     <div class="meta" id="meta"></div>
     <div id="out"></div>
+    <div id="dupNote"></div>
     <div class="map" id="map"></div>
     <div class="alts" id="alts"></div>
   </div>
@@ -202,7 +209,7 @@ const $=id=>document.getElementById(id);
 const S={url:'',token:'',index:null,tabs:null,worker:null,busy:false,
          lastKey:'',lastAt:0,cycles:0,wide:false,detector:null,seen:new Set(),
          streakKey:'',streak:0,streakAt:0,
-         user:'',done:{},lastRender:null,cfg:{strips:'20',holds:''},holds:{}};
+         user:'',done:{},lastRender:null,cfg:{strips:'20',holds:''},holds:{},dupes:{}};
 
 const RESCAN_MS = 4000;   // after this, the same label may be reported again
 
@@ -293,6 +300,8 @@ async function start(url,token){
   }
   if(!S.user) S.user='phone '+Math.floor(Math.random()*90+10);
   await pullSettings();
+  pullDupes();                       // background: never blocks scanning
+  setInterval(pullDupes, 300000);
   pollProgress();
   setInterval(pollProgress, 5000);
   setInterval(pullSettings, 30000);
@@ -496,7 +505,12 @@ function readings(tok){
  */
 function vendorMatches(pref,tab){
   if(!pref||!tab) return false;
-  const P=pref.toUpperCase(), T=tab.toUpperCase(), T1=T.slice(1);
+  // A tab may be called "SA (2)" to sit beside "SA"; the barcode carries the
+  // stripped form "SA2", so compare on that.
+  const P=String(pref).toUpperCase().replace(/[^A-Z0-9]/g,'');
+  const T=String(tab).toUpperCase().replace(/[^A-Z0-9]/g,'');
+  const T1=T.slice(1);
+  if(!P||!T) return false;
   if(P===T || T.startsWith(P) || P.startsWith(T)) return true;
   if(P===T1 || T1.startsWith(P) || (T1.length>1 && P.startsWith(T1))) return true;
   // a clipped first character: "AL" off a glary "PAL"
@@ -733,6 +747,23 @@ $('btnSaveSetup').onclick=async ()=>{
   setTimeout(()=>$('setupMsg').textContent='',4000);
 };
 
+/* ---------------------------------------- duplicate coding labels
+   Fetched after the index, on its own, because reading the label column makes
+   Sheets evaluate the pricing chain. A slow answer costs nothing: scanning
+   works throughout and the rings appear when the data arrives.              */
+async function pullDupes(){
+  try{
+    const r=await api({action:'dupes'},{ms:90000,tries:1});
+    if(r&&r.ok&&r.dupes){
+      S.dupes=r.dupes;
+      const n=Object.keys(S.dupes).length;
+      if(n) setStatus(Object.keys(S.index).length+' codes · '+n+' dup labels','busy');
+      paintDone();
+    }
+  }catch(e){}
+}
+const isDup=(t,s)=>S.dupes[String(t).toUpperCase()+'|'+String(s).trim()];
+
 /* ------------------------------------------------- shared progress ("done") */
 const dkey=(t,ser)=>String(t).toUpperCase()+'|'+String(ser).trim();
 
@@ -746,12 +777,30 @@ async function pollProgress(){
 /** Repaint tick state without rebuilding the result, so a scan is not lost. */
 function paintDone(){
   document.querySelectorAll('.chip[data-k],.seg.hit[data-k]').forEach(el=>{
+    const k=el.getAttribute('data-k');
+    const dup=S.dupes[k];
+    el.classList.toggle('dup', !!dup);
+    if(dup) el.title='Coding label '+dup.l+' is also on '+dup.w.join(', ');
     if(el.classList.contains('pend')) return;          // a click is still in flight
-    const rec=S.done[el.getAttribute('data-k')];
+    const rec=S.done[k];
     el.classList.toggle('done', !!rec);
     const w=el.querySelector('.who');
     if(w) w.textContent = rec ? (rec.u||'done') : '';
   });
+  // spell the clashes out under the result, not just as a colour
+  const note=document.getElementById('dupNote');
+  if(note){
+    const hits=[...document.querySelectorAll('.chip[data-k]')]
+      .map(el=>[el.getAttribute('data-ser'),S.dupes[el.getAttribute('data-k')]])
+      .filter(x=>x[1]);
+    note.innerHTML = hits.length
+      ? '<b>Duplicate coding label</b> — serial'+(hits.length>1?'s ':' ')+
+        hits.map(x=>esc(x[0])).join(', ')+' print'+(hits.length>1?'':'s')+
+        ' the same sticker as '+
+        [...new Set(hits.map(x=>x[1].w.join(', ')))].join(' / ')+'.'
+      : '';
+    note.className = hits.length ? 'dupnote' : '';
+  }
   const chips=[...document.querySelectorAll('.chip[data-k]')];
   if(chips.length){
     const n=chips.filter(c=>c.classList.contains('done')).length;
