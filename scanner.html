@@ -141,13 +141,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. Nothing is stored on this device.</div>
-    <div class="ver">V14</div>
+    <div class="ver">V15</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V14</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V15</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
     <span class="pill batchset" id="stripInfo">strips: 20</span>
@@ -284,7 +284,10 @@ async function start(url,token){
     S.tabs=new Set();
     let rows=0;
     for(const k in S.index){ rows+=S.index[k].length;
-      for(const x of S.index[k]) S.tabs.add(String(x.t).toUpperCase()); }
+      for(const x of S.index[k]){
+        S.tabs.add(String(x.t).toUpperCase());
+        if(x.g) S.tabs.add(String(x.g).toUpperCase());   // designer codes too
+      } }
     setStatus(Object.keys(S.index).length+' codes','on');
     $('meta').textContent='Loaded '+rows+' rows across '+S.tabs.size+' designers.';
   }catch(e){
@@ -569,7 +572,11 @@ function candidates(text,strict){
           if(k.length<=2 && !monthOK){
             reason=reason||'short D.No. '+k+' not followed by a month'; continue;
           }
-          let onVendorTab=rows.filter(r=>vendorMatches(pref,r.t));
+          // Match on the row's OWN designer code (column A) first — that is
+          // what the barcode carries. The tab name is only a fallback, since a
+          // tab may be called "SA (2)" while holding designer SAV.
+          let onVendorTab=rows.filter(r=>vendorMatches(pref, r.g||r.t));
+          if(!onVendorTab.length) onVendorTab=rows.filter(r=>vendorMatches(pref,r.t));
           if(!onVendorTab.length){ reason=reason||'D.No. '+k+' is not on '+pref+"'s tab"; continue; }
 
           // A D.No. may carry a letter: BRUD has both 3263 and 3263A. The
