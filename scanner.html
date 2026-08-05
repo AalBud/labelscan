@@ -146,13 +146,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. The connection details are kept for this browser tab only, so Reset can bring you straight back, and are dropped when you close it.</div>
-    <div class="ver">V19</div>
+    <div class="ver">V20</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V19</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V20</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
     <span class="pill" id="count">0 scans</span>
@@ -219,6 +219,23 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
 <script>
 "use strict";
 const $=id=>document.getElementById(id);
+
+/**
+ * Bind a handler without letting a missing element break the rest of the
+ * script. Assigning straight to $('x').onclick throws when the markup and the
+ * code drift apart, and everything defined after that line silently never
+ * runs — which is exactly how the Type button stopped working.
+ */
+function on(id, ev, fn){
+  const el=$(id);
+  if(!el){ console.warn('[scanner] no element #'+id+' — handler skipped'); return false; }
+  el.addEventListener(ev, function(e){
+    try{ return fn.call(this, e); }
+    catch(err){ console.error('[scanner] '+id+' '+ev, err);
+                try{ $('live').textContent=id+' failed: '+err.message; }catch(_){} }
+  });
+  return true;
+}
 const S={url:'',token:'',index:null,tabs:null,worker:null,busy:false,
          lastKey:'',lastAt:0,cycles:0,wide:false,detector:null,seen:new Set(),
          streakKey:'',streak:0,streakAt:0,
@@ -255,7 +272,7 @@ function rememberSession(){
   }
 })();
 
-$('btnGo').onclick=()=>{
+on('btnGo','click',()=>{
   $('gateErr').textContent='';
   S.user=($('inName').value||'').trim().slice(0,18);
   if(CONFIG.apiUrl&&CONFIG.token){
@@ -266,7 +283,7 @@ $('btnGo').onclick=()=>{
     if(!u||!t){$('gateErr').textContent='Both fields are required.';return;}
     start(u,t);
   }
-};
+});
 showGate();
 
 /* ------------------------------------------------------------------- api */
@@ -452,7 +469,7 @@ async function softReset(why){
   }
   S.resetting=false;
 }
-$('btnReset').onclick=()=>{
+on('btnReset','click',()=>{
   // A full reload clears anything the browser has got stuck on — the camera,
   // the OCR worker, the whole page. The session is put aside first so the
   // page comes straight back up without asking for anything again.
@@ -461,7 +478,7 @@ $('btnReset').onclick=()=>{
       {url:S.url, token:S.token, user:S.user, auto:1}));
   }catch(e){}
   location.reload();
-};
+});
 
 /** The video clock stops advancing when the camera has been suspended. */
 function watchStall(){
@@ -905,9 +922,9 @@ async function pullSettings(){
     }
   }catch(e){}
 }
-$('btnSetup').onclick=()=>{ $('setup').classList.toggle('hide'); showHoldEcho(); };
-$('inHolds').oninput=()=>{ S.holds=parseHolds($('inHolds').value); showHoldEcho(); };
-$('btnSaveSetup').onclick=async ()=>{
+on('btnSetup','click',()=>{ $('setup').classList.toggle('hide'); showHoldEcho(); });
+on('inHolds','input',()=>{ S.holds=parseHolds($('inHolds').value); showHoldEcho(); });
+on('btnSaveSetup','click',async ()=>{
   $('setupMsg').textContent='saving…';
   try{
     const r=await api({action:'setsettings',strips:$('inStrips').value.trim(),
@@ -922,7 +939,7 @@ $('btnSaveSetup').onclick=async ()=>{
     }else $('setupMsg').textContent='save failed';
   }catch(e){ $('setupMsg').textContent='save failed ('+e.message+')'; }
   setTimeout(()=>$('setupMsg').textContent='',4000);
-};
+});
 
 /* ---------------------------------------- duplicate coding labels
    Fetched after the index, on its own, because reading the label column makes
@@ -1216,25 +1233,24 @@ function beep(f,ms){try{ac=ac||new(window.AudioContext||window.webkitAudioContex
   g.gain.setValueAtTime(.05,ac.currentTime);o.start();o.stop(ac.currentTime+ms/1000);}catch(e){}}
 
 /* --------------------------------------------------------------- buttons */
-$('btnClear').onclick=()=>{
+on('btnClear','click',()=>{
   S.lastKey='';S.lastAt=0;S.streakKey='';S.streak=0;S.streakAt=0;
   $('raw').textContent='—';$('dno').className='dno none';$('dno').textContent='point at a label';
   $('meta').textContent='';$('out').innerHTML='';$('alts').innerHTML='';
   $('map').innerHTML='';
-};
-$('inBatch').onchange=()=>{ if(S.lastRender) render(...S.lastRender); };
-$('btnWide').onclick=()=>{
+});
+on('btnWide','click',()=>{
   S.wide=!S.wide;
   $('btnWide').textContent=S.wide?'Guide box':'Full frame';
   document.querySelector('.guide').style.opacity=S.wide?0.25:1;
-};
-$('btnType').onclick=()=>{
+});
+on('btnType','click',()=>{
   const bar=$('typebar');
   bar.classList.toggle('hide');
   if(!bar.classList.contains('hide')){ $('inType').value=''; $('inType').focus(); }
-};
-$('btnGoType').onclick=()=>lookupTyped($('inType').value);
-$('inType').addEventListener('keydown',e=>{ if(e.key==='Enter') lookupTyped($('inType').value); });
+});
+on('btnGoType','click',()=>lookupTyped($('inType').value));
+on('inType','keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); lookupTyped($('inType').value); } });
 
 /**
  * A typed entry. Letters may sit at either end of a D.No. — AKS uses I86 and
