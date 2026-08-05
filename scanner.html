@@ -141,15 +141,16 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. Nothing is stored on this device.</div>
-    <div class="ver">V16</div>
+    <div class="ver">V17</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V16</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V17</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
+    <span class="pill" id="count">0 scans</span>
     <span class="pill batchset" id="stripInfo">strips: 20</span>
     <button class="pill" id="btnSetup" style="cursor:pointer">Setup</button>
   </div>
@@ -163,6 +164,8 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
       <button id="btnWide">Full frame</button>
       <button id="btnClear">Clear</button>
       <button id="btnType">Type</button>
+      <button id="btnUndo">Undo</button>
+      <button id="btnReset">Reset</button>
     </div>
   </div>
 
@@ -209,7 +212,7 @@ const $=id=>document.getElementById(id);
 const S={url:'',token:'',index:null,tabs:null,worker:null,busy:false,
          lastKey:'',lastAt:0,cycles:0,wide:false,detector:null,seen:new Set(),
          streakKey:'',streak:0,streakAt:0,
-         user:'',done:{},lastRender:null,cfg:{strips:'20',holds:''},holds:{},dupes:{}};
+         user:'',done:{},lastRender:null,cfg:{strips:'20',holds:''},holds:{},dupes:{},scans:0,wake:null,stall:0,lastVt:-1,lastTick:null,resetting:false};
 
 const RESCAN_MS = 4000;   // after this, the same label may be reported again
 
@@ -309,10 +312,12 @@ async function start(url,token){
   setInterval(pollProgress, 5000);
   setInterval(pullSettings, 30000);
   await initCamera();
+  await keepAwake();
   initBarcode();
   initOcr();               // not awaited: barcode scanning starts immediately
   loop();
   watchdog();
+  watchStall();
 }
 function setStatus(t,c){const p=$('status');p.textContent=t;p.className='pill'+(c?' '+c:'')}
 
@@ -331,6 +336,22 @@ async function initCamera(){
     if(caps.focusMode&&caps.focusMode.includes('continuous'))
       track.applyConstraints({advanced:[{focusMode:'continuous'}]}).catch(()=>{});
     await v.play();
+    // tap the picture to nudge autofocus, which is what usually fixes a
+    // blurry close-up on a phone that has settled on the wrong distance
+    v.onclick=async ()=>{
+      if(!track||!track.getCapabilities) return;
+      const caps=track.getCapabilities();
+      if(!caps.focusMode) return;
+      try{
+        if(caps.focusMode.includes('single-shot')){
+          await track.applyConstraints({advanced:[{focusMode:'single-shot'}]});
+          setTimeout(()=>track.applyConstraints({advanced:[{focusMode:'continuous'}]}).catch(()=>{}),1200);
+        }else{
+          await track.applyConstraints({advanced:[{focusMode:'continuous'}]});
+        }
+        $('live').textContent='refocusing…'; buzz(15);
+      }catch(e){}
+    };
     // a paused video is the classic "frozen camera" - bring it straight back
     v.addEventListener('pause',()=>v.play().catch(()=>{}));
     document.addEventListener('visibilitychange',()=>{ if(!document.hidden) v.play().catch(()=>{}); });
@@ -338,6 +359,85 @@ async function initCamera(){
     setStatus('no camera','err');
     $('meta').textContent='Camera blocked ('+e.name+'). Needs HTTPS and permission.';
   }
+}
+
+/* ------------------------------------------------- staying alive
+
+   A Pixel suspends the camera when the screen dims, which is the usual reason
+   scanning quietly stops. Three defences, in order of preference:
+
+     1. a screen wake lock, so the display never dims while the page is open
+     2. a stall detector — if the video clock stops advancing, restart for you
+     3. the Reset button, for when you would rather just do it yourself
+
+   None of them touch the session: the sheet, your token and your name stay
+   exactly as they were, and the index is not re-fetched.
+   ================================================================== */
+
+async function keepAwake(){
+  try{
+    if('wakeLock' in navigator && !S.wake){
+      S.wake=await navigator.wakeLock.request('screen');
+      S.wake.addEventListener('release',()=>{ S.wake=null; });
+    }
+  }catch(e){ /* unsupported or refused; the stall detector still covers us */ }
+}
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden){ keepAwake(); const v=$('vid'); if(v.srcObject) v.play().catch(()=>{}); }
+});
+
+async function stopCamera(){
+  try{
+    const v=$('vid');
+    if(v.srcObject){ v.srcObject.getTracks().forEach(t=>{ try{ t.stop(); }catch(e){} }); }
+    v.srcObject=null;
+  }catch(e){}
+  track=null;
+}
+
+/** Restart the camera and the OCR worker. Session and index are untouched. */
+async function softReset(why){
+  if(S.resetting) return;
+  S.resetting=true;
+  setStatus(why||'restarting…','busy');
+  $('live').textContent='restarting the camera…';
+  S.busy=false; S.streakKey=''; S.streak=0; S.streakAt=0; S.lastKey=''; S.lastAt=0;
+  S.stall=0; S.lastVt=-1;
+  try{
+    if(S.worker){ try{ await S.worker.terminate(); }catch(e){} S.worker=null; }
+    await stopCamera();
+    await new Promise(r=>setTimeout(r,300));      // let the OS release the camera
+    await initCamera();
+    initBarcode();
+    await initOcr();
+    await keepAwake();
+    setStatus('scanning','on');
+    $('live').textContent='ready';
+    beep(700,60);
+  }catch(e){
+    setStatus('restart failed','err');
+    $('live').textContent='restart failed: '+e.message+' — try the Reset button again';
+  }
+  S.resetting=false;
+}
+$('btnReset').onclick=()=>softReset('resetting…');
+
+/** The video clock stops advancing when the camera has been suspended. */
+function watchStall(){
+  setInterval(()=>{
+    if(document.hidden || S.resetting) return;
+    const v=$('vid');
+    if(!v.srcObject){ S.stall=0; return; }
+    const vt=v.currentTime;
+    if(vt===S.lastVt){
+      S.stall++;
+      if(S.stall===2) $('live').textContent='camera looks stalled…';
+      if(S.stall>=4){ S.stall=0; softReset('camera stalled — restarting'); }
+    }else{
+      S.stall=0;
+    }
+    S.lastVt=vt;
+  }, 2000);
 }
 
 /* -------------------------------------------------- native barcode reader */
@@ -837,6 +937,7 @@ async function toggleDone(el){
   const k=el.getAttribute('data-k');
   const wasDone=!!S.done[k];
   const tab=el.getAttribute('data-tab'), ser=el.getAttribute('data-ser'), dno=el.getAttribute('data-dno');
+  S.lastTick={k:k,tab:tab,ser:ser,dno:dno,was:wasDone};
   // optimistic: colour it now, confirm with the server after
   el.classList.add('pend');
   el.classList.toggle('done', !wasDone);
@@ -850,7 +951,7 @@ async function toggleDone(el){
   }
   el.classList.remove('pend');
   paintDone();
-  beep(wasDone?300:620,70);
+  beep(wasDone?300:620,70); buzz(wasDone?20:35);
 }
 
 /* ======================= WHERE IS THE STICKER? ==========================
@@ -1029,7 +1130,6 @@ function render(raw,best,alts){
   }
   $('out').innerHTML=html;
   $('map').innerHTML=buildMap(byTab);
-  if(held.length) beep(200,260);
   [...document.querySelectorAll('.chip[data-k],.seg.hit[data-k]')]
       .forEach(c=>c.onclick=()=>toggleDone(c));
   paintDone();
@@ -1044,7 +1144,9 @@ function render(raw,best,alts){
   });
   addHistory(best.key,Object.keys(byTab).map(t=>t+': '+byTab[t].map(x=>x.s).join(', ')).join(' | '),
              Object.keys(byTab).join(', '));
-  beep(880,90);
+  S.scans++; $('count').textContent=S.scans+' scan'+(S.scans===1?'':'s');
+  if(held.length){ beep(200,260); buzz([90,70,90]); }   // on hold: stutter
+  else           { beep(880,90);  buzz(45); }           // clean read: one tap
 }
 function addHistory(dno,serials,tab){
   const key=dno+'|'+tab;
@@ -1055,12 +1157,27 @@ function addHistory(dno,serials,tab){
     '</td><td class="n">'+esc(dno)+'</td><td>'+esc(tab)+'</td><td class="n">'+esc(serials)+'</td>';
   $('hist').prepend(tr);
 }
+function buzz(pattern){ try{ if(navigator.vibrate) navigator.vibrate(pattern); }catch(e){} }
 let ac=null;
 function beep(f,ms){try{ac=ac||new(window.AudioContext||window.webkitAudioContext)();
   const o=ac.createOscillator(),g=ac.createGain();o.frequency.value=f;o.connect(g);g.connect(ac.destination);
   g.gain.setValueAtTime(.05,ac.currentTime);o.start();o.stop(ac.currentTime+ms/1000);}catch(e){}}
 
 /* --------------------------------------------------------------- buttons */
+$('btnUndo').onclick=async ()=>{
+  if(!S.lastTick){ $('live').textContent='nothing to undo'; return; }
+  const el=document.querySelector('.chip[data-k="'+CSS.escape(S.lastTick.k)+'"]');
+  if(el){ await toggleDone(el); }
+  else{
+    try{
+      const r=await api({action:'mark',tab:S.lastTick.tab,serial:S.lastTick.ser,
+                         dno:S.lastTick.dno,done:S.lastTick.was?'1':'0',user:S.user});
+      if(r&&r.ok&&r.done){ S.done=r.done; paintDone(); }
+    }catch(e){}
+  }
+  $('live').textContent='undone: '+S.lastTick.tab+' '+S.lastTick.ser;
+  S.lastTick=null;
+};
 $('btnClear').onclick=()=>{
   S.lastKey='';S.lastAt=0;S.streakKey='';S.streak=0;S.streakAt=0;
   $('raw').textContent='—';$('dno').className='dno none';$('dno').textContent='point at a label';
