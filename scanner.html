@@ -141,13 +141,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. Nothing is stored on this device.</div>
-    <div class="ver">V17</div>
+    <div class="ver">V18</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V17</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V18</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
     <span class="pill" id="count">0 scans</span>
@@ -589,13 +589,16 @@ function readings(tok){
       if(ok) push(pref,tail,'',-1);
     }
 
-    // (b) one letter survives inside the tail - a D.No. suffix such as 3263A.
-    //     Remove it, remember where it sat, and let the loop below decide
-    //     whether the D.No. actually ends there.
-    const letters=[...rawTail].map((c,i)=>[c,i]).filter(([c])=>/[A-Z]/.test(c));
-    if(letters.length===1 && letters[0][1]>=3){
-      const at=letters[0][1], ch=letters[0][0];
-      const cut=digitize(rawTail.slice(0,at))+digitize(rawTail.slice(at+1));
+    // (b) letters survive inside the tail because the D.No. itself carries
+    //     them — either in front (AKS uses I86, Z504, F233) or behind
+    //     (BRUD has 3263A). Lift the run out, remember where it sat, and let
+    //     the loop below work out which end of the number it belongs to.
+    const runs=[]; let mm;
+    const re=/[A-Z]+/g;
+    while((mm=re.exec(rawTail))!==null) runs.push(mm);
+    if(runs.length===1 && runs[0].index>=3 && runs[0][0].length<=2){
+      const at=runs[0].index, ch=runs[0][0];
+      const cut=digitize(rawTail.slice(0,at))+digitize(rawTail.slice(at+ch.length));
       if(/^[0-9]{8,}$/.test(cut)) push(pref,cut,ch,at);
     }
   }
@@ -694,14 +697,23 @@ function candidates(text,strict){
           if(!onVendorTab.length) onVendorTab=rows.filter(r=>vendorMatches(pref,r.t));
           if(!onVendorTab.length){ reason=reason||'D.No. '+k+' is not on '+pref+"'s tab"; continue; }
 
-          // A D.No. may carry a letter: BRUD has both 3263 and 3263A. The
-          // suffix counts only when the letter sat exactly where this D.No.
-          // ends. No letter there means keep the plain numeric variant.
+          // A D.No. may carry letters at either end:
+          //     AKS  I86, Z504, F233   -> letter in FRONT, sitting at offset 3
+          //     BRUD 3263A             -> letter BEHIND, sitting at 3+len
+          // Anywhere else and we cut the number in the wrong place.
+          const isHead = rd.suf && rd.at === 3;
           const suffix = (rd.at === 3+len) ? rd.suf : '';
-          if(rd.suf && rd.at !== 3+len) continue;   // letter is elsewhere: wrong cut
+          if(rd.suf && !isHead && rd.at !== 3+len) continue;
           const tailOf=r=>{ const m=String(r.dn||'').toUpperCase().match(/([A-Z]+)$/); return m?m[1]:''; };
-          const exact=onVendorTab.filter(r=> suffix ? tailOf(r)===suffix : tailOf(r)==='');
-          if(exact.length) onVendorTab=exact;
+          const headOf=r=>{ const m=String(r.dn||'').toUpperCase().match(/^([A-Z]+)/); return m?m[1]:''; };
+          if(isHead){
+            // I86 and H86 both key on 86 — the leading letter separates them
+            const exact=onVendorTab.filter(r=>headOf(r)===rd.suf);
+            if(exact.length) onVendorTab=exact;
+          }else{
+            const exact=onVendorTab.filter(r=> suffix ? tailOf(r)===suffix : tailOf(r)==='');
+            if(exact.length) onVendorTab=exact;
+          }
           // Only one letter survived the glare. Accept it, but only when it
           // points at a single designer - otherwise we would be guessing which.
           if(pref.length<2){
@@ -710,8 +722,8 @@ function candidates(text,strict){
               reason=reason||'only one designer letter readable'; continue;
             }
           }
-          add(k+(suffix||''), 100 + k.length*4 + (monthOK?30:0) + (suffix?10:0),
-              'D.No. '+k+(suffix||'')+' after serial'+(monthOK?', month '+after:'')+
+          add(k+(isHead?'':(suffix||'')), 100 + k.length*4 + (monthOK?30:0) + (suffix?10:0),
+              'D.No. '+(isHead?rd.suf+k:k+(suffix||''))+' after serial'+(monthOK?', month '+after:'')+
               ', '+onVendorTab[0].t+' confirmed', tok, onVendorTab);
         }
       }
