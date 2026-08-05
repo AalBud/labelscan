@@ -141,13 +141,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. Nothing is stored on this device.</div>
-    <div class="ver">V15</div>
+    <div class="ver">V16</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V15</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V16</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
     <span class="pill batchset" id="stripInfo">strips: 20</span>
@@ -569,8 +569,23 @@ function candidates(text,strict){
           if(!rows) continue;
           const after=dg.slice(3+len,3+len+2);
           const monthOK=/^\d{2}$/.test(after) && +after>=1 && +after<=12;
-          if(k.length<=2 && !monthOK){
-            reason=reason||'short D.No. '+k+' not followed by a month'; continue;
+          // The month sitting straight after the D.No. is the confirmation
+          // that we cut it in the right place. It is required for a 1-2 digit
+          // D.No. (too short to trust on its own), and for any code that looks
+          // truncated — a whole label carries 15 digits or more.
+          // The month sitting straight after the D.No. confirms we cut it in
+          // the right place, and it is required whenever the read is not a
+          // clearly complete code. A 1-2 digit D.No. needs BOTH the month and
+          // a full-length code: it is far too short to trust on a half-read
+          // label, where a stray digit run can look like a real one.
+          if(!monthOK && (k.length<=2 || dg.length<13)){
+            reason=reason||(dg.length<13
+              ? 'code looks cut off — no month after '+k
+              : 'short D.No. '+k+' not followed by a month'); continue;
+          }
+          if(k.length<=2 && dg.length<13){
+            reason=reason||'D.No. '+k+' is too short to trust on a partial code';
+            continue;
           }
           // Match on the row's OWN designer code (column A) first — that is
           // what the barcode carries. The tab name is only a fallback, since a
