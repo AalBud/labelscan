@@ -82,6 +82,11 @@
   .warn{margin-top:10px;padding:11px 13px;border-radius:9px;background:#4a2c05;
         border:1px solid #d29922;color:#ffe8a3;font-weight:700;font-size:15px}
   .warn small{display:block;font-weight:500;font-size:12px;opacity:.9;margin-top:3px}
+  .typebar{display:flex;gap:8px;margin-top:10px}
+  .typebar input{flex:1;padding:12px;border-radius:9px;border:1px solid var(--accent);
+        background:#0d1117;color:var(--txt);font:600 16px ui-monospace,Menlo,monospace}
+  .typebar button{padding:12px 18px;border:0;border-radius:9px;background:var(--accent);
+        color:#04121f;font-weight:700;font-size:14px;white-space:nowrap}
   .setup{margin-top:10px;background:var(--panel);border:1px solid var(--line);
          border-radius:12px;padding:12px}
   .setup textarea{width:100%;min-height:64px;padding:9px;border-radius:8px;
@@ -140,14 +145,14 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <input id="inName" placeholder="e.g. Aalish" autocomplete="off">
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
-    <div class="hint">Ticks are shared with everyone scanning. Nothing is stored on this device.</div>
-    <div class="ver">V18</div>
+    <div class="hint">Ticks are shared with everyone scanning. The connection details are kept for this browser tab only, so Reset can bring you straight back, and are dropped when you close it.</div>
+    <div class="ver">V19</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V18</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V19</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
     <span class="pill" id="count">0 scans</span>
@@ -164,9 +169,14 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
       <button id="btnWide">Full frame</button>
       <button id="btnClear">Clear</button>
       <button id="btnType">Type</button>
-      <button id="btnUndo">Undo</button>
       <button id="btnReset">Reset</button>
     </div>
+  </div>
+
+  <div class="typebar hide" id="typebar">
+    <input id="inType" placeholder="D.No. (I86, 953, 3263A) or the whole code"
+           autocomplete="off" autocapitalize="characters" spellcheck="false">
+    <button id="btnGoType">Look up</button>
   </div>
 
   <div class="res">
@@ -212,7 +222,7 @@ const $=id=>document.getElementById(id);
 const S={url:'',token:'',index:null,tabs:null,worker:null,busy:false,
          lastKey:'',lastAt:0,cycles:0,wide:false,detector:null,seen:new Set(),
          streakKey:'',streak:0,streakAt:0,
-         user:'',done:{},lastRender:null,cfg:{strips:'20',holds:''},holds:{},dupes:{},scans:0,wake:null,stall:0,lastVt:-1,lastTick:null,resetting:false};
+         user:'',done:{},lastRender:null,cfg:{strips:'20',holds:''},holds:{},dupes:{},scans:0,wake:null,stall:0,lastVt:-1,resetting:false};
 
 const RESCAN_MS = 4000;   // after this, the same label may be reported again
 
@@ -224,6 +234,27 @@ function showGate(){
     else start(CONFIG.apiUrl,CONFIG.token);
   }
 }
+function rememberSession(){
+  try{
+    sessionStorage.setItem('mv_session', JSON.stringify(
+      {url:S.url, token:S.token, user:S.user, auto:0}));
+  }catch(e){}
+}
+/** Put the boxes back the way they were, and reconnect if Reset sent us here. */
+(function restoreSession(){
+  let saved=null;
+  try{ saved=JSON.parse(sessionStorage.getItem('mv_session')||'null'); }catch(e){}
+  if(!saved||!saved.url||!saved.token) return;
+  $('inUrl').value=saved.url; $('inTok').value=saved.token;
+  $('inName').value=saved.user||'';
+  $('btnGo').textContent='Reconnect';
+  if(saved.auto){
+    try{ sessionStorage.setItem('mv_session',
+         JSON.stringify(Object.assign({},saved,{auto:0}))); }catch(e){}
+    setTimeout(()=>$('btnGo').click(), 60);
+  }
+})();
+
 $('btnGo').onclick=()=>{
   $('gateErr').textContent='';
   S.user=($('inName').value||'').trim().slice(0,18);
@@ -311,6 +342,7 @@ async function start(url,token){
   pollProgress();
   setInterval(pollProgress, 5000);
   setInterval(pullSettings, 30000);
+  rememberSession();
   await initCamera();
   await keepAwake();
   initBarcode();
@@ -420,7 +452,16 @@ async function softReset(why){
   }
   S.resetting=false;
 }
-$('btnReset').onclick=()=>softReset('resetting…');
+$('btnReset').onclick=()=>{
+  // A full reload clears anything the browser has got stuck on — the camera,
+  // the OCR worker, the whole page. The session is put aside first so the
+  // page comes straight back up without asking for anything again.
+  try{
+    sessionStorage.setItem('mv_session', JSON.stringify(
+      {url:S.url, token:S.token, user:S.user, auto:1}));
+  }catch(e){}
+  location.reload();
+};
 
 /** The video clock stops advancing when the camera has been suspended. */
 function watchStall(){
@@ -949,7 +990,6 @@ async function toggleDone(el){
   const k=el.getAttribute('data-k');
   const wasDone=!!S.done[k];
   const tab=el.getAttribute('data-tab'), ser=el.getAttribute('data-ser'), dno=el.getAttribute('data-dno');
-  S.lastTick={k:k,tab:tab,ser:ser,dno:dno,was:wasDone};
   // optimistic: colour it now, confirm with the server after
   el.classList.add('pend');
   el.classList.toggle('done', !wasDone);
@@ -1176,20 +1216,6 @@ function beep(f,ms){try{ac=ac||new(window.AudioContext||window.webkitAudioContex
   g.gain.setValueAtTime(.05,ac.currentTime);o.start();o.stop(ac.currentTime+ms/1000);}catch(e){}}
 
 /* --------------------------------------------------------------- buttons */
-$('btnUndo').onclick=async ()=>{
-  if(!S.lastTick){ $('live').textContent='nothing to undo'; return; }
-  const el=document.querySelector('.chip[data-k="'+CSS.escape(S.lastTick.k)+'"]');
-  if(el){ await toggleDone(el); }
-  else{
-    try{
-      const r=await api({action:'mark',tab:S.lastTick.tab,serial:S.lastTick.ser,
-                         dno:S.lastTick.dno,done:S.lastTick.was?'1':'0',user:S.user});
-      if(r&&r.ok&&r.done){ S.done=r.done; paintDone(); }
-    }catch(e){}
-  }
-  $('live').textContent='undone: '+S.lastTick.tab+' '+S.lastTick.ser;
-  S.lastTick=null;
-};
 $('btnClear').onclick=()=>{
   S.lastKey='';S.lastAt=0;S.streakKey='';S.streak=0;S.streakAt=0;
   $('raw').textContent='—';$('dno').className='dno none';$('dno').textContent='point at a label';
@@ -1203,31 +1229,50 @@ $('btnWide').onclick=()=>{
   document.querySelector('.guide').style.opacity=S.wide?0.25:1;
 };
 $('btnType').onclick=()=>{
-  const v=prompt('Type a D.No. (e.g. 953 or 3263A) or the whole printed code');
-  if(v===null) return;
-  const raw=String(v).trim().toUpperCase();
+  const bar=$('typebar');
+  bar.classList.toggle('hide');
+  if(!bar.classList.contains('hide')){ $('inType').value=''; $('inType').focus(); }
+};
+$('btnGoType').onclick=()=>lookupTyped($('inType').value);
+$('inType').addEventListener('keydown',e=>{ if(e.key==='Enter') lookupTyped($('inType').value); });
+
+/**
+ * A typed entry. Letters may sit at either end of a D.No. — AKS uses I86 and
+ * Z504, BRUD has 3263A, the packing slip has DN01 — so both ends are allowed
+ * and used to narrow the match. Anything longer is treated as a whole code.
+ */
+function lookupTyped(v){
+  const raw=String(v==null?'':v).trim().toUpperCase();
   if(!raw) return;
   S.lastKey=''; S.streakKey=''; S.streak=0;
 
-  // A bare D.No. - digits with an optional letter - is looked up directly,
-  // which is what you almost always want when typing.
-  const bare=raw.match(/^([0-9]{1,6})\s*([A-Z]?)$/);
+  const bare=raw.match(/^([A-Z]{0,3})\s*([0-9]{1,6})\s*([A-Z]{0,2})$/);
   if(bare){
-    const key=strip(bare[1]), suf=bare[2]||'';
+    const head=bare[1]||'', key=strip(bare[2]), tail=bare[3]||'';
     const all=S.index[key]||[];
+    const headOf=r=>{const m=String(r.dn||'').toUpperCase().match(/^([A-Z]+)/);return m?m[1]:'';};
     const tailOf=r=>{const m=String(r.dn||'').toUpperCase().match(/([A-Z]+)$/);return m?m[1]:'';};
-    let rows=all.filter(r=> suf ? tailOf(r)===suf : tailOf(r)==='');
-    if(!rows.length) rows=all;                 // no exact variant: show them all
-    if(rows.length) render('(typed) '+raw,{key:key+suf,why:'typed D.No.',rows:rows},[]);
-    else noMatch(raw,key+suf);
+    let rows=all;
+    if(head) rows=rows.filter(r=>headOf(r)===head);
+    if(tail) rows=rows.filter(r=>tailOf(r)===tail);
+    if(!head && !tail){                       // plain number: prefer plain D.Nos
+      const plain=all.filter(r=>!headOf(r)&&!tailOf(r));
+      if(plain.length) rows=plain;
+    }
+    if(!rows.length) rows=all;                // no exact variant, show them all
+    if(rows.length){
+      render('(typed) '+raw,{key:head+key+tail,why:'typed D.No.',rows:rows,ctx:raw},[]);
+      $('typebar').classList.add('hide');
+    }else noMatch(raw,head+key+tail);
     return;
   }
-  // Otherwise treat it as a whole printed code. Typed text has no OCR damage,
-  // so the strict reading is tried first and only then the forgiving one.
-  const cs=candidates(raw,true).length ? candidates(raw,true) : candidates(raw,false);
-  if(cs.length){ render('(typed) '+raw, cs[0], cs.slice(1,5)); return; }
+  // Otherwise a whole printed code. Typed text carries no OCR damage, so try
+  // the disciplined reading first and only then the forgiving one.
+  const strictHits=candidates(raw,true);
+  const cs=strictHits.length?strictHits:candidates(raw,false);
+  if(cs.length){ render('(typed) '+raw, cs[0], cs.slice(1,5)); $('typebar').classList.add('hide'); return; }
   noMatch(raw, strip(raw.replace(/\D/g,'')) );
-};
+}
 
 function noMatch(raw,key){
   $('raw').textContent='(typed) '+raw;
