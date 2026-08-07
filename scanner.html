@@ -146,13 +146,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. The connection details are kept for this browser tab only, so Reset can bring you straight back, and are dropped when you close it.</div>
-    <div class="ver">V20</div>
+    <div class="ver">V22</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V20</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V22</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
     <span class="pill" id="count">0 scans</span>
@@ -201,6 +201,11 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
       that tab only. Held serials are treated as never printed, so strip positions after them
       shift up automatically.</div>
     <div class="note" id="holdEcho" style="margin-top:6px"></div>
+    <label style="margin-top:10px">Vendor code → designer</label>
+    <textarea id="inAlias" spellcheck="false" placeholder="AMA=ST"></textarea>
+    <div class="note">Only needed when the printed code shares no letters with the tab —
+      <b>AMA=ST</b>. HAZ, TUL, VAL and the rest are matched automatically.
+      <span id="aliasEcho"></span></div>
     <div class="row">
       <button id="btnSaveSetup">Save for everyone</button>
       <span class="note" id="setupMsg" style="margin:0"></span>
@@ -239,7 +244,7 @@ function on(id, ev, fn){
 const S={url:'',token:'',index:null,tabs:null,worker:null,busy:false,
          lastKey:'',lastAt:0,cycles:0,wide:false,detector:null,seen:new Set(),
          streakKey:'',streak:0,streakAt:0,
-         user:'',done:{},lastRender:null,cfg:{strips:'20',holds:''},holds:{},dupes:{},scans:0,wake:null,stall:0,lastVt:-1,resetting:false};
+         user:'',done:{},lastRender:null,cfg:{strips:'20',holds:'',aliases:''},holds:{},alias:{},dupes:{},scans:0,wake:null,stall:0,lastVt:-1,resetting:false};
 
 const RESCAN_MS = 4000;   // after this, the same label may be reported again
 
@@ -658,6 +663,16 @@ function readings(tok){
       const at=runs[0].index, ch=runs[0][0];
       const cut=digitize(rawTail.slice(0,at))+digitize(rawTail.slice(at+ch.length));
       if(/^[0-9]{8,}$/.test(cut)) push(pref,cut,ch,at);
+
+      // A two-letter D.No. prefix such as AAR's DN01 often comes back with the
+      // first letter already turned into a digit — D reads as 0, S as 5, B as
+      // 8. If a lone letter sits at offset 4 with one of those digits in front
+      // of it, offer the reading where BOTH are the prefix, so the D.No. is
+      // still cut in the right place.
+      if(at===4 && ch.length===1 && /[0158269]/.test(rawTail[3])){
+        const cut2=digitize(rawTail.slice(0,3))+digitize(rawTail.slice(5));
+        if(/^[0-9]{8,}$/.test(cut2)) push(pref,cut2,rawTail[3]+ch,3);
+      }
     }
   }
   return out;
@@ -667,8 +682,35 @@ function readings(tok){
  * Do these leading letters name this tab?  AMY↔AM, VAL↔BVAL, HAZ↔CHAZ, AAR↔CAAR
  * — the packing slip drops the first letter of the tab name.
  */
+/** "AMA" -> "ST" when the table says so, otherwise unchanged. */
+function aliasOf(p){
+  const k=String(p||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  return S.alias[k] || p;
+}
+/**
+ * Vendor codes written as  AMA=ST  (one per line, or comma separated), for
+ * labels whose printed code shares no letters with the tab. Everything else
+ * is matched on the prefix rules below and needs no entry here.
+ */
+function parseAliases(txt){
+  const out={};
+  String(txt||'').split(/[\n,;]+/).forEach(line=>{
+    const m=line.trim().match(/^([A-Za-z0-9 _()-]+?)\s*(?:=|->|:)\s*([A-Za-z0-9 _()-]+)$/);
+    if(!m) return;
+    const from=m[1].toUpperCase().replace(/[^A-Z0-9]/g,'');
+    const to=m[2].trim();
+    if(from&&to) out[from]=to;
+  });
+  return out;
+}
+function aliasSummary(){
+  const k=Object.keys(S.alias);
+  return k.length ? k.map(x=>x+' → '+S.alias[x]).join('   ') : '';
+}
+
 function vendorMatches(pref,tab){
   if(!pref||!tab) return false;
+  pref=aliasOf(pref);
   // A tab may be called "SA (2)" only so it can sit beside "SA". The "(2)" is
   // bookkeeping, not part of the designer, so both tabs answer to SA.
   const base=x=>String(x).toUpperCase()
@@ -912,9 +954,11 @@ async function pullSettings(){
     if(r&&r.ok&&r.settings){
       S.cfg=r.settings;
       S.holds=parseHolds(S.cfg.holds);
+      S.alias=parseAliases(S.cfg.aliases);
+      $('inAlias').value=S.cfg.aliases||'';
       $('inStrips').value=S.cfg.strips||'20';
       $('inHolds').value=S.cfg.holds||'';
-      showHoldEcho();
+      showHoldEcho(); showAliasEcho();
       const sz=stripSizes();
       $('stripInfo').textContent='strips: '+(sz.length===1?sz[0]:sz.join(', ')+'…')+
         (Object.keys(S.holds).length?'  ·  holds on':'');
@@ -922,19 +966,21 @@ async function pullSettings(){
     }
   }catch(e){}
 }
-on('btnSetup','click',()=>{ $('setup').classList.toggle('hide'); showHoldEcho(); });
+on('btnSetup','click',()=>{ $('setup').classList.toggle('hide'); showHoldEcho(); showAliasEcho(); });
 on('inHolds','input',()=>{ S.holds=parseHolds($('inHolds').value); showHoldEcho(); });
+on('inAlias','input',()=>{ S.alias=parseAliases($('inAlias').value); showAliasEcho(); });
 on('btnSaveSetup','click',async ()=>{
   $('setupMsg').textContent='saving…';
   try{
     const r=await api({action:'setsettings',strips:$('inStrips').value.trim(),
-                       holds:$('inHolds').value.trim(),user:S.user});
+                       holds:$('inHolds').value.trim(),
+                       aliases:$('inAlias').value.trim(),user:S.user});
     if(r&&r.ok){
-      S.cfg=r.settings; S.holds=parseHolds(S.cfg.holds);
+      S.cfg=r.settings; S.holds=parseHolds(S.cfg.holds); S.alias=parseAliases(S.cfg.aliases);
       const sz=stripSizes();
       $('stripInfo').textContent='strips: '+(sz.length===1?sz[0]:sz.join(', ')+'…');
       $('setupMsg').textContent='saved — everyone sees this';
-      showHoldEcho();
+      showHoldEcho(); showAliasEcho();
       if(S.lastRender) render(...S.lastRender);
     }else $('setupMsg').textContent='save failed';
   }catch(e){ $('setupMsg').textContent='save failed ('+e.message+')'; }
@@ -1112,6 +1158,12 @@ function slotOf(serial,tab){
     left-=size; i++;
   }
   return null;
+}
+function showAliasEcho(){
+  const el=$('aliasEcho'); if(!el) return;
+  const t=aliasSummary();
+  el.innerHTML = t ? '<br>Reading this as: <b>'+esc(t)+'</b>'
+                   : ($('inAlias').value.trim() ? '<br><span style="color:var(--bad)">Nothing recognised — use AMA=ST</span>' : '');
 }
 function showHoldEcho(){
   const el=$('holdEcho'); if(!el) return;
