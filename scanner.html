@@ -146,13 +146,13 @@ const CONFIG = { apiUrl:'', token:'', pin:'' };
     <button class="primary" id="btnGo">Connect</button>
     <div class="err" id="gateErr"></div>
     <div class="hint">Ticks are shared with everyone scanning. The connection details are kept for this browser tab only, so Reset can bring you straight back, and are dropped when you close it.</div>
-    <div class="ver">V22</div>
+    <div class="ver">V23</div>
   </div>
 </div>
 
 <div class="wrap hide" id="app">
   <div class="bar">
-    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V22</span></h1>
+    <h1>Label Scanner <span style="color:var(--accent);font-size:11px">V23</span></h1>
     <span class="pill spacer" id="status">starting…</span>
     <span class="pill" id="tick">–</span>
     <span class="pill" id="count">0 scans</span>
@@ -725,6 +725,33 @@ function vendorMatches(pref,tab){
   if(P.length>=1 && (T.endsWith(P) || T1.endsWith(P))) return true;
   return false;
 }
+/** Tabs this printed code resolves to, after any alias. */
+function tabsFor(pref){
+  const out=[]; for(const t of S.tabs) if(vendorMatches(pref,t)) out.push(t);
+  return out;
+}
+/** How many indexed rows a tab has. Zero means column D is empty on it. */
+function rowsOnTab(tab){
+  let n=0; for(const k in S.index) for(const r of S.index[k]) if(r.t===tab) n++;
+  return n;
+}
+/**
+ * "not on AMA's tab" sent Aalish hunting for a tab-name bug when the real
+ * cause was an empty D.No. column. Say which tab we resolved to, where the
+ * number actually is, and whether that tab has any D.No. values at all.
+ */
+function missReason(pref,k,rows){
+  const mine=tabsFor(pref);
+  const where=[...new Set(rows.map(r=>r.t))].join(', ');
+  if(!mine.length) return 'D.No. '+k+' is on '+where+'; "'+pref+'" matches no tab';
+  const empty=mine.filter(t=>rowsOnTab(t)===0);
+  const via=pref+(aliasOf(pref)!==pref?' → '+mine.join('/'):'');
+  if(empty.length===mine.length)
+    return 'tab '+empty.join('/')+' has no D.No. values yet — paste column D, then run clearIndexCache(). ('+
+           'D.No. '+k+' is on '+where+', '+via+')';
+  return 'D.No. '+k+' is on '+where+', not on '+mine.join('/')+' ('+via+')';
+}
+
 function knownVendor(pref){
   if(!S.tabs) return true;
   for(const t of S.tabs) if(vendorMatches(pref,t)) return true;
@@ -759,7 +786,12 @@ function candidates(text,strict){
       for(const rd of readings(tok)){
         const pref=rd.pref, dg=rd.dg;
         if(!pref || pref.length>5){ reason=reason||'no designer letters'; continue; }
-        if(!knownVendor(pref)){ reason=reason||'unknown designer "'+pref+'"'; continue; }
+        if(!knownVendor(pref)){
+          reason=reason||(aliasOf(pref)!==pref
+            ? 'no tab called "'+aliasOf(pref)+'" — check the '+pref+' alias'
+            : 'unknown designer "'+pref+'"');
+          continue;
+        }
         if(dg.length<MIN_DIGITS){ reason=reason||'partial code ('+dg.length+' digits, need '+MIN_DIGITS+')'; continue; }
         // The D.No. starts right after the 3-digit serial and is 1-6 digits
         // long. Whatever its length, the two digits straight after it are the
@@ -795,7 +827,7 @@ function candidates(text,strict){
           // tab may be called "SA (2)" while holding designer SAV.
           let onVendorTab=rows.filter(r=>vendorMatches(pref, r.g||r.t));
           if(!onVendorTab.length) onVendorTab=rows.filter(r=>vendorMatches(pref,r.t));
-          if(!onVendorTab.length){ reason=reason||'D.No. '+k+' is not on '+pref+"'s tab"; continue; }
+          if(!onVendorTab.length){ reason=reason||missReason(pref,k,rows); continue; }
 
           // A D.No. may carry letters at either end:
           //     AKS  I86, Z504, F233   -> letter in FRONT, sitting at offset 3
@@ -1162,7 +1194,15 @@ function slotOf(serial,tab){
 function showAliasEcho(){
   const el=$('aliasEcho'); if(!el) return;
   const t=aliasSummary();
-  el.innerHTML = t ? '<br>Reading this as: <b>'+esc(t)+'</b>'
+  let warn='';
+  for(const from in S.alias){
+    const tabs=tabsFor(from);
+    if(!tabs.length){ warn+='<br><span style="color:var(--bad)">'+esc(from)+
+      ' → no tab called '+esc(S.alias[from])+'</span>'; continue; }
+    if(tabs.every(x=>rowsOnTab(x)===0)) warn+='<br><span style="color:var(--bad)">'+
+      esc(tabs.join('/'))+' has no D.No. values — nothing there can be scanned yet</span>';
+  }
+  el.innerHTML = t ? '<br>Reading this as: <b>'+esc(t)+'</b>'+warn
                    : ($('inAlias').value.trim() ? '<br><span style="color:var(--bad)">Nothing recognised — use AMA=ST</span>' : '');
 }
 function showHoldEcho(){
